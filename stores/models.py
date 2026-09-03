@@ -1,4 +1,7 @@
 from django.db import models
+from django.conf import settings
+
+User = settings.AUTH_USER_MODEL
 
 class Store(models.Model):
     name = models.CharField(max_length=200)
@@ -10,6 +13,7 @@ class Store(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        db_table = "stores"
         verbose_name = "Cửa hàng"
         verbose_name_plural = "Cửa hàng"
 
@@ -26,6 +30,7 @@ class AuditLog(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        db_table = "audit_logs"
         indexes = [
             models.Index(fields=["user"]),
             models.Index(fields=["target_type", "target_id"]),

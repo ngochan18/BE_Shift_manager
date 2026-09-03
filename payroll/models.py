@@ -1,4 +1,8 @@
 from django.db import models
+from django.conf import settings
+from stores.models import Store
+
+User = settings.AUTH_USER_MODEL
 
 class PayrollPeriod(models.Model):
     class Status(models.TextChoices):
@@ -16,6 +20,7 @@ class PayrollPeriod(models.Model):
     note = models.TextField(blank=True)
 
     class Meta:
+        db_table = "payroll_periods"
         unique_together = ["store", "month", "year"]
         ordering = ["-year", "-month"]
 
@@ -36,6 +41,7 @@ class PayrollDetail(models.Model):
     note = models.TextField(blank=True)
 
     class Meta:
+        db_table = "payroll_details"
         unique_together = ["period", "user"]
 
     def __str__(self):

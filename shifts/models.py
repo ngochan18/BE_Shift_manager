@@ -1,4 +1,8 @@
 from django.db import models
+from django.conf import settings
+from stores.models import Store
+
+User = settings.AUTH_USER_MODEL
 
 class ShiftTemplate(models.Model):
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name="shift_templates")
@@ -10,6 +14,7 @@ class ShiftTemplate(models.Model):
     is_active = models.BooleanField(default=True)
 
     class Meta:
+        db_table = "shift_templates"
         unique_together = ["store", "name"]
         ordering = ["start_time"]
 
@@ -28,9 +33,10 @@ class Shift(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        db_table = "shifts"
         constraints = [
             models.CheckConstraint(
-                check=models.Q(end_time__gt=models.F("start_time")),
+                condition=models.Q(end_time__gt=models.F("start_time")),
                 name="shift_no_time_paradox"
             )
         ]
@@ -56,6 +62,7 @@ class ShiftAssignment(models.Model):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.CONFIRMED)
 
     class Meta:
+        db_table = "shift_assignments"
         unique_together = ["shift", "user"]
         indexes = [
             models.Index(
@@ -94,9 +101,10 @@ class ShiftSwapRequest(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
+        db_table = "shift_swap_requests"
         constraints = [
             models.CheckConstraint(
-                check=models.Q(swap_type="claim") | models.Q(offered_shift__isnull=False),
+                condition=models.Q(swap_type="claim") | models.Q(offered_shift__isnull=False),
                 name="exchange_needs_offered_shift"
             )
         ]

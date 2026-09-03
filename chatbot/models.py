@@ -1,10 +1,16 @@
 from django.db import models
+from django.conf import settings
+
+User = settings.AUTH_USER_MODEL
 
 class ChatbotSession(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="chat_sessions")
     title = models.CharField(max_length=200, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_active_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "chatbot_sessions"
 
 
 class ChatbotMessage(models.Model):
@@ -17,4 +23,5 @@ class ChatbotMessage(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        db_table = "chatbot_messages"
         ordering = ["created_at"]

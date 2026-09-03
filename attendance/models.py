@@ -1,4 +1,8 @@
 from django.db import models
+from django.conf import settings
+from shifts.models import Shift
+
+User = settings.AUTH_USER_MODEL
 
 class QRToken(models.Model):
     shift = models.ForeignKey(Shift, on_delete=models.CASCADE, related_name="qr_tokens")
@@ -8,6 +12,7 @@ class QRToken(models.Model):
     is_used = models.BooleanField(default=False)
 
     class Meta:
+        db_table = "qr_tokens"
         indexes = [
             models.Index(fields=["token"]),
             models.Index(fields=["expires_at", "is_used"]),
@@ -33,6 +38,7 @@ class CheckInRecord(models.Model):
     note = models.TextField(blank=True)
 
     class Meta:
+        db_table = "check_in_records"
         unique_together = ["shift", "user"]
         indexes = [models.Index(fields=["user", "shift"])]
 
