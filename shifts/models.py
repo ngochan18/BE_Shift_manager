@@ -80,6 +80,7 @@ class ShiftSwapRequest(models.Model):
     class SwapType(models.TextChoices):
         CLAIM    = "claim",    "Tranh ca"
         EXCHANGE = "exchange", "Đổi ca"
+        TRANSFER = "transfer", "Nhượng ca"
 
     class Status(models.TextChoices):
         PENDING   = "pending",   "Chờ duyệt"
@@ -90,6 +91,7 @@ class ShiftSwapRequest(models.Model):
 
     swap_type = models.CharField(max_length=10, choices=SwapType.choices)
     requester = models.ForeignKey(User, on_delete=models.CASCADE, related_name="swap_requests")
+    partner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="incoming_swap_requests_partner")
     target_shift = models.ForeignKey(Shift, on_delete=models.CASCADE, related_name="incoming_swap_requests")
     offered_shift = models.ForeignKey(Shift, on_delete=models.SET_NULL, null=True, blank=True, related_name="offered_swap_requests")
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
@@ -105,7 +107,7 @@ class ShiftSwapRequest(models.Model):
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(swap_type="claim") | models.Q(offered_shift__isnull=False),
-                name="exchange_needs_offered_shift"
+                name="non_claim_needs_offered_shift"
             )
         ]
 
