@@ -132,16 +132,9 @@ class ShiftViewSet(viewsets.ModelViewSet):
         except User.DoesNotExist:
             return Response({"detail": "Nhân viên không tồn tại."}, status=status.HTTP_404_NOT_FOUND)
 
-        assignment, created = ShiftAssignment.objects.get_or_create(
-            shift=shift,
-            user=user,
-            defaults={
-                'assigned_by': request.user,
-                'status': ShiftAssignment.Status.CONFIRMED
-            }
-        )
-        if not created:
-            return Response({"detail": "Nhân viên đã được phân công vào ca này."}, status=status.HTTP_400_BAD_REQUEST)
+        assignment, error = claim_open_shift(user=user, shift=shift, assigned_by=request.user)
+        if not assignment:
+            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({
             "message": "Phân công nhân viên thành công.",
@@ -292,7 +285,7 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
         # TH1: Đổi ca
         if swap.swap_type == ShiftSwapRequest.SwapType.EXCHANGE and swap.offered_shift:
             if not swap.partner:
-                return Response({"detail": "Yêu cầu đổi ca phải có người chấp nhận (partner)."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Yêu cầu đổi ca phải có người chấp nhận."}, status=status.HTTP_400_BAD_REQUEST)
 
             target_shift = swap.target_shift
             offered_shift = swap.offered_shift
@@ -328,7 +321,6 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
                     if overlap_b:
                         raise ValueError(f"{swap.partner.full_name} bị trùng khung giờ với ca được đổi sang.")
 
-                    # Hoán đổi user thay vì shift (giữ lại tracking assigned_by/at)
                     assignment_a.user = swap.partner
                     assignment_b.user = swap.requester
                     assignment_a.save()
@@ -342,41 +334,72 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
         # TH2: Nhượng ca
         elif swap.swap_type == ShiftSwapRequest.SwapType.TRANSFER and swap.offered_shift:
             if not swap.partner:
-                return Response({"detail": "Yêu cầu nhượng ca phải có người nhận (partner)."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Yêu cầu nhượng ca phải có người nhận (partner)."}, 
+                               status=status.HTTP_400_BAD_REQUEST)
 
             offered_shift = swap.offered_shift
-            target_shift = swap.target_shift
-
-            # Kiểm tra NV nhượng
             try:
-                assignment_a = ShiftAssignment.objects.get(
-                    shift=offered_shift, user=swap.requester, status=ShiftAssignment.Status.CONFIRMED
-                )
-            except ShiftAssignment.DoesNotExist:
-                return Response({"detail": "Người nhượng không còn giữ ca này."}, status=status.HTTP_400_BAD_REQUEST)
+                with transaction.atomic():
+                    try:
+                        assignment_requester = ShiftAssignment.objects.select_for_update().get(
+                            shift=offered_shift,
+                            user=swap.requester,
+                            status=ShiftAssignment.Status.CONFIRMED
+                        )
+                    except ShiftAssignment.DoesNotExist:
+                        return Response({"detail": "Người nhượng không còn giữ ca này nữa."}, 
+                                    status=status.HTTP_400_BAD_REQUEST)
 
-            # Kiểm tra NV nhận
-            try:
-                target_assignment = ShiftAssignment.objects.get(
-                    shift=target_shift, user=swap.partner, status=ShiftAssignment.Status.CONFIRMED
-                )
-            except ShiftAssignment.DoesNotExist:
-                return Response({"detail": "Người nhận ca không còn làm việc tại ca mục tiêu."}, status=status.HTTP_400_BAD_REQUEST)
+                    if ShiftAssignment.objects.filter(
+                        shift=offered_shift,
+                        user=swap.partner,
+                        status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED]
+                    ).exists():
+                        return Response({"detail": f"{swap.partner.full_name} đã đăng ký hoặc đang giữ ca này rồi."}, 
+                                    status=status.HTTP_400_BAD_REQUEST)
+                    overlapping = ShiftAssignment.objects.filter(
+                        user=swap.partner,
+                        status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED],
+                        shift__date=offered_shift.date,
+                        shift__start_time__lt=offered_shift.end_time,
+                        shift__end_time__gt=offered_shift.start_time,
+                    ).exists()
 
-            user_b = swap.partner
+                    if overlapping:
+                        return Response({
+                            "detail": f"{swap.partner.full_name} đã có ca làm trùng khung giờ với ca được nhượng."
+                        }, status=status.HTTP_400_BAD_REQUEST)
 
-            # Gọi hàm dùng chung: hủy assignment cũ + tạo mới cho NV nhận
-            assignment, error = claim_open_shift(user=user_b, shift=offered_shift, assigned_by=request.user, from_user=swap.requester)
-            if error:
-                return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+                    assignment_requester.status = ShiftAssignment.Status.CANCELLED
+                    assignment_requester.save()
+                    new_assignment = ShiftAssignment.objects.create(
+                        shift=offered_shift,
+                        user=swap.partner,
+                        assigned_by=request.user,
+                        status=ShiftAssignment.Status.CONFIRMED
+                    )
 
-        # Cập nhật trạng thái swap request
-        swap.status = ShiftSwapRequest.Status.ACCEPTED
-        swap.resolved_by = request.user
-        swap.resolved_at = timezone.now()
-        swap.save()
+                    confirmed_count = ShiftAssignment.objects.filter(
+                        shift=offered_shift,
+                        status=ShiftAssignment.Status.CONFIRMED
+                    ).count()
 
-        return Response({"message": "Yêu cầu đổi ca đã được duyệt."}, status=status.HTTP_200_OK)
+                    if offered_shift.template and confirmed_count >= offered_shift.template.max_workers:
+                        offered_shift.is_open = False
+                        offered_shift.save()
+
+            except Exception as e:
+                return Response({"detail": f"Lỗi hệ thống khi xử lý nhượng ca: {str(e)}"}, 
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            swap.status = ShiftSwapRequest.Status.ACCEPTED
+            swap.resolved_by = request.user
+            swap.resolved_at = timezone.now()
+            swap.save()
+
+            return Response({
+                "message": f"Đã duyệt nhượng ca thành công. {swap.partner.full_name} đã nhận thêm ca."
+            }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminRole])
     def reject(self, request, pk=None):
