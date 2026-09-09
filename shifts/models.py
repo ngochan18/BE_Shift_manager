@@ -28,6 +28,8 @@ class Shift(models.Model):
     start_time = models.TimeField()
     end_time = models.TimeField()
     is_open = models.BooleanField(default=False)  # ca trống chờ tranh
+    is_emergency = models.BooleanField(default=False)  # ca khẩn cấp
+    salary_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1.00) # hệ số lương phụ trội
     note = models.TextField(blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="created_shifts")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -38,6 +40,10 @@ class Shift(models.Model):
             models.CheckConstraint(
                 condition=models.Q(end_time__gt=models.F("start_time")),
                 name="shift_no_time_paradox"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(salary_multiplier__gte=1.0),
+                name="salary_multiplier_at_least_1"
             )
         ]
         indexes = [
