@@ -15,6 +15,7 @@ from .serializers import (
     ShiftSwapRequestSerializer,
 )
 from django.db import transaction
+from django.db.models import Q
 User = get_user_model()
 
 def claim_open_shift(user, shift, from_user=None, assigned_by=None):
@@ -271,17 +272,59 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if hasattr(user, 'role') and user.role == 'admin':
             return ShiftSwapRequest.objects.all().order_by('-created_at')
-        return ShiftSwapRequest.objects.filter(requester=user).order_by('-created_at')
-
+        return ShiftSwapRequest.objects.filter(Q(requester=user) | Q(partner=user)).order_by('-created_at')
+    def get_permissions(self):
+        if self.action in ['update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), IsAdminRole()]
+        return [IsAuthenticated()]
     def perform_create(self, serializer):
-        serializer.save(requester=self.request.user)
+        user = self.request.user
+        partner = serializer.validated_data.get('partner')
+        swap_type = serializer.validated_data.get('swap_type')
+
+        if not partner or swap_type == ShiftSwapRequest.SwapType.CLAIM:
+            serializer.save(requester=user, status=ShiftSwapRequest.Status.PARTNER_ACCEPTED)
+        else:
+            serializer.save(requester=user, status=ShiftSwapRequest.Status.PENDING)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def partner_accept(self, request, pk=None):
+        """NV B (partner) xác nhận đồng ý yêu cầu đổi/nhượng ca"""
+        swap = self.get_object()
+        if request.user != swap.partner:
+            return Response({"detail": "Bạn không có quyền xác nhận yêu cầu này."}, status=status.HTTP_403_FORBIDDEN)
+        
+        if swap.status != ShiftSwapRequest.Status.PENDING:
+            return Response({"detail": "Yêu cầu này không ở trạng thái chờ bạn xác nhận."}, status=status.HTTP_400_BAD_REQUEST)
+
+        swap.status = ShiftSwapRequest.Status.PARTNER_ACCEPTED
+        swap.save()
+        return Response({"message": "Bạn đã xác nhận đồng ý yêu cầu đổi/nhượng ca. Vui lòng chờ Admin duyệt."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def partner_reject(self, request, pk=None):
+        """NV B (partner) từ chối yêu cầu đổi/nhượng ca"""
+        swap = self.get_object()
+        if request.user != swap.partner:
+            return Response({"detail": "Bạn không có quyền từ chối yêu cầu này."}, status=status.HTTP_403_FORBIDDEN)
+        
+        if swap.status != ShiftSwapRequest.Status.PENDING:
+            return Response({"detail": "Yêu cầu này không ở trạng thái chờ bạn xác nhận."}, status=status.HTTP_400_BAD_REQUEST)
+
+        swap.status = ShiftSwapRequest.Status.PARTNER_REJECTED
+        swap.resolved_by = request.user
+        swap.resolved_at = timezone.now()
+        swap.save()
+        return Response({"message": "Bạn đã từ chối yêu cầu đổi/nhượng ca."}, status=status.HTTP_200_OK)
+
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminRole])
     def approve(self, request, pk=None):
         """Admin duyệt yêu cầu đổi/tranh/nhượng ca"""
         swap = self.get_object()
-        if swap.status != ShiftSwapRequest.Status.PENDING:
-            return Response({"detail": "Yêu cầu này không còn ở trạng thái chờ duyệt."}, status=status.HTTP_400_BAD_REQUEST)
+        if swap.status != ShiftSwapRequest.Status.PARTNER_ACCEPTED:
+            return Response({"detail": "Yêu cầu này không ở trạng thái chờ Admin duyệt."}, status=status.HTTP_400_BAD_REQUEST)
+
         # TH1: Đổi ca
         if swap.swap_type == ShiftSwapRequest.SwapType.EXCHANGE and swap.offered_shift:
             if not swap.partner:
@@ -392,20 +435,30 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
                 return Response({"detail": f"Lỗi hệ thống khi xử lý nhượng ca: {str(e)}"}, 
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            swap.status = ShiftSwapRequest.Status.ACCEPTED
-            swap.resolved_by = request.user
-            swap.resolved_at = timezone.now()
-            swap.save()
+        # TH3: Tranh ca
+        elif swap.swap_type == ShiftSwapRequest.SwapType.CLAIM:
+            assignment, error = claim_open_shift(user=swap.requester, shift=swap.target_shift, assigned_by=request.user)
+            if not assignment:
+                return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response({
-                "message": f"Đã duyệt nhượng ca thành công. {swap.partner.full_name} đã nhận thêm ca."
-            }, status=status.HTTP_200_OK)
+        swap.status = ShiftSwapRequest.Status.ACCEPTED
+        swap.resolved_by = request.user
+        swap.resolved_at = timezone.now()
+        swap.save()
+
+        # Thông báo phản hồi chung
+        msg_map = {
+            ShiftSwapRequest.SwapType.EXCHANGE: f"Đã duyệt đổi ca thành công giữa {swap.requester.full_name} và {swap.partner.full_name}.",
+            ShiftSwapRequest.SwapType.TRANSFER: f"Đã duyệt nhượng ca thành công. {swap.partner.full_name} đã nhận thêm ca.",
+            ShiftSwapRequest.SwapType.CLAIM: f"Đã duyệt tranh ca thành công cho {swap.requester.full_name}."
+        }
+        return Response({"message": msg_map.get(swap.swap_type, "Đã duyệt yêu cầu thành công.")}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminRole])
     def reject(self, request, pk=None):
         """Admin từ chối yêu cầu đổi ca"""
         swap = self.get_object()
-        if swap.status != ShiftSwapRequest.Status.PENDING:
+        if swap.status not in [ShiftSwapRequest.Status.PENDING, ShiftSwapRequest.Status.PARTNER_ACCEPTED]:
             return Response({"detail": "Yêu cầu này không còn ở trạng thái chờ duyệt."}, status=status.HTTP_400_BAD_REQUEST)
 
         swap.status = ShiftSwapRequest.Status.REJECTED
