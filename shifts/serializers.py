@@ -52,3 +52,22 @@ class ShiftSwapRequestSerializer(serializers.ModelSerializer):
             'resolved_by', 'resolved_at'
         ]
         read_only_fields = ['id', 'requester', 'status', 'created_at', 'updated_at', 'resolved_by', 'resolved_at']
+    def validate(self, data):
+        swap_type = data.get('swap_type')
+        partner = data.get('partner')
+        target_shift = data.get('target_shift')
+        offered_shift = data.get('offered_shift')
+        request = self.context.get('request')
+        requester = request.user if request else None
+    
+        if swap_type == ShiftSwapRequest.SwapType.EXCHANGE:
+            if not partner or not offered_shift:
+                raise serializers.ValidationError("Đổi ca cần có người đổi và ca đổi.")
+        if swap_type == ShiftSwapRequest.SwapType.CLAIM and partner:
+            raise serializers.ValidationError("Tranh ca không cần chỉ định đối tác.")
+        if partner and requester and partner == requester:
+            raise serializers.ValidationError("Không thể tạo yêu cầu với chính mình.")
+        if offered_shift and target_shift and offered_shift == target_shift:
+            raise serializers.ValidationError("Ca đề xuất và ca mục tiêu không được giống nhau.")
+        if target_shift and target_shift.date < date.today():
+            raise serializers.ValidationError("Không thể tạo yêu cầu cho ca đã diễn ra.")

@@ -89,18 +89,20 @@ class ShiftSwapRequest(models.Model):
         TRANSFER = "transfer", "Nhượng ca"
 
     class Status(models.TextChoices):
-        PENDING   = "pending",   "Chờ duyệt"
-        ACCEPTED  = "accepted",  "Đã chấp nhận"
-        REJECTED  = "rejected",  "Từ chối"
-        CANCELLED = "cancelled", "Đã hủy"
-        EXPIRED   = "expired",   "Hết hạn"
+        PENDING          = "pending",          "Chờ NV B xác nhận"
+        PARTNER_ACCEPTED = "partner_accepted", "NV B đã đồng ý, chờ Admin"
+        PARTNER_REJECTED = "partner_rejected", "NV B từ chối"
+        ACCEPTED         = "accepted",         "Admin đã duyệt"
+        REJECTED         = "rejected",         "Admin từ chối"
+        CANCELLED        = "cancelled",        "Đã hủy"
+        EXPIRED          = "expired",          "Hết hạn"
 
     swap_type = models.CharField(max_length=10, choices=SwapType.choices)
     requester = models.ForeignKey(User, on_delete=models.CASCADE, related_name="swap_requests")
     partner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="incoming_swap_requests_partner")
     target_shift = models.ForeignKey(Shift, on_delete=models.CASCADE, related_name="incoming_swap_requests")
     offered_shift = models.ForeignKey(Shift, on_delete=models.SET_NULL, null=True, blank=True, related_name="offered_swap_requests")
-    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     message = models.TextField(blank=True)
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
