@@ -5,8 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from datetime import date
-
+from datetime import date, datetime
 from accounts.permissions import IsAdminRole
 from .models import ShiftTemplate, Shift, ShiftAssignment, ShiftSwapRequest
 from .serializers import (
@@ -119,6 +118,69 @@ class ShiftViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    @action(detail=False, methods=['post'], url_path='create-emergency')
+    def create_emergency(self, request):
+        """Admin tạo ca khẩn cấp"""
+        data = request.data.copy()
+        
+        data['is_emergency'] = True
+        
+        if 'is_open' not in data:
+            data['is_open'] = True
+            
+        if 'salary_multiplier' not in data or float(data.get('salary_multiplier', 1.0)) < 1.0:
+            data['salary_multiplier'] = 1.5  
+            
+        serializer = self.get_serializer(data=data)
+        if serializer.is_valid():
+            phones = request.data.get('phones', [])
+            users_to_assign = []
+            
+            # 1. Kiểm tra số điện thoại trước khi lưu bất cứ thứ gì vào DB
+            if isinstance(phones, list) and phones:
+                users_to_assign = list(User.objects.filter(phone__in=phones))
+                found_phones = set(u.phone for u in users_to_assign)
+                missing_phones = set(phones) - found_phones
+                
+                if missing_phones:
+                    return Response({
+                        "detail": f"Không tìm thấy nhân viên với số điện thoại: {', '.join(missing_phones)}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 2. Bắt đầu lưu dữ liệu vào DB
+            try:
+                with transaction.atomic():
+                    shift = serializer.save(created_by=request.user)
+                    
+                    # Phân công trực tiếp cho nhân viên theo số điện thoại
+                    if users_to_assign:
+                        for user in users_to_assign:
+                            ShiftAssignment.objects.get_or_create(
+                                shift=shift,
+                                user=user,
+                                defaults={
+                                    'assigned_by': request.user,
+                                    'status': ShiftAssignment.Status.CONFIRMED
+                                }
+                            )
+                            
+                        # Tự động đóng ca nếu đã phân công đủ người
+                        confirmed_count = ShiftAssignment.objects.filter(
+                            shift=shift, status=ShiftAssignment.Status.CONFIRMED
+                        ).count()
+                        if confirmed_count >= shift.max_workers:
+                            shift.is_open = False
+                            shift.save()
+
+                    return Response({
+                        "message": "Tạo ca khẩn cấp thành công.",
+                        "shift": self.get_serializer(shift).data
+                    }, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"detail": f"Lỗi hệ thống: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
     @action(detail=True, methods=['post'])
     def assign(self, request, pk=None):
         """Admin phân công nhân viên vào ca"""
@@ -173,24 +235,56 @@ class ShiftViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def claim(self, request, pk=None):
         """Nhân viên đăng ký nguyện vọng nhận ca trống"""
-        shift = self.get_object()
+        try:
+            with transaction.atomic():
 
-        # 1. Không cho đăng ký ca đã qua
-        if shift.date < date.today():
-            return Response({"detail": "Không thể đăng ký ca đã diễn ra."}, status=status.HTTP_400_BAD_REQUEST)
+                shift = Shift.objects.select_for_update().get(pk=pk)
+                self.check_object_permissions(request, shift)
 
-        # 2. Kiểm tra ca có đang mở không
-        if not shift.is_open:
-            return Response({"detail": "Ca này không phải ca trống, không thể đăng ký."}, status=status.HTTP_400_BAD_REQUEST)
+                # 1. Không cho đăng ký ca đã qua hoặc đã kết thúc
+                shift_end_datetime = timezone.make_aware(
+                    datetime.combine(shift.date, shift.end_time)
+                )
+                if shift_end_datetime <= timezone.now():
+                    return Response({
+                        "detail": "Ca làm việc này đã kết thúc, không thể đăng ký."
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
-        assignment, error = claim_open_shift(user=request.user, shift=shift, assigned_by=None)
-        if error:
-            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+                # 2. Kiểm tra ca có đang mở không
+                if not shift.is_open:
+                    return Response({"detail": "Ca này không phải ca trống hoặc đã đủ người, không thể đăng ký."}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response({
-            "message": "Đăng ký nguyện vọng thành công. Vui lòng chờ Admin duyệt.",
-            "assignment": ShiftAssignmentSerializer(assignment).data
-        }, status=status.HTTP_201_CREATED)
+                assignment, error = claim_open_shift(user=request.user, shift=shift, assigned_by=None)
+                if error:
+                    return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+
+                # 3. Phê duyệt tự động nếu là ca khẩn cấp
+                if shift.is_emergency:
+                    assignment.status = ShiftAssignment.Status.CONFIRMED
+                    assignment.save()
+                    
+                    # Khóa ca nếu đã đủ người
+                    confirmed_count = ShiftAssignment.objects.filter(
+                        shift=shift, status=ShiftAssignment.Status.CONFIRMED
+                    ).count()
+                    
+                    max_workers = shift.max_workers if shift.max_workers else (shift.template.max_workers if shift.template else 1)
+                    if confirmed_count >= max_workers:
+                        shift.is_open = False
+                        shift.save()
+                        
+                    return Response({
+                        "message": "Bạn đã nhận ca khẩn cấp thành công. Ca đã được tự động xác nhận.",
+                        "assignment": ShiftAssignmentSerializer(assignment).data
+                    }, status=status.HTTP_201_CREATED)
+
+                return Response({
+                    "message": "Đăng ký nguyện vọng thành công. Vui lòng chờ Admin duyệt.",
+                    "assignment": ShiftAssignmentSerializer(assignment).data
+                }, status=status.HTTP_201_CREATED)
+
+        except Shift.DoesNotExist:
+            return Response({"detail": "Không tìm thấy ca này."}, status=status.HTTP_404_NOT_FOUND)
 
     @action(detail=True, methods=['post'], url_path='approve-claim/(?P<assignment_id>[^/.]+)')
     def approve_claim(self, request, pk=None, assignment_id=None):

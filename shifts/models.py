@@ -29,6 +29,7 @@ class Shift(models.Model):
     end_time = models.TimeField()
     is_open = models.BooleanField(default=False)  # ca trống chờ tranh
     is_emergency = models.BooleanField(default=False)  # ca khẩn cấp
+    max_workers = models.PositiveIntegerField(default=1) # số lượng nhân sự cần thiết
     salary_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1.00) # hệ số lương phụ trội
     note = models.TextField(blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="created_shifts")
