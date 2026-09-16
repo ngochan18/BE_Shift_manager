@@ -59,15 +59,37 @@ class ShiftSwapRequestSerializer(serializers.ModelSerializer):
         offered_shift = data.get('offered_shift')
         request = self.context.get('request')
         requester = request.user if request else None
-    
+
         if swap_type == ShiftSwapRequest.SwapType.EXCHANGE:
+            if not partner or not offered_shift or not target_shift:
+                raise serializers.ValidationError("Đổi ca cần có người đổi, ca đích và ca đề xuất.")
+        elif swap_type == ShiftSwapRequest.SwapType.TRANSFER:
             if not partner or not offered_shift:
-                raise serializers.ValidationError("Đổi ca cần có người đổi và ca đổi.")
-        if swap_type == ShiftSwapRequest.SwapType.CLAIM and partner:
-            raise serializers.ValidationError("Tranh ca không cần chỉ định đối tác.")
+                raise serializers.ValidationError("Nhượng ca cần có người nhận và ca đề xuất.")
+            if target_shift:
+                raise serializers.ValidationError("Nhượng ca không cần ca mục tiêu.")
+        elif swap_type == ShiftSwapRequest.SwapType.CLAIM:
+            if partner:
+                raise serializers.ValidationError("Tranh ca không cần chỉ định đối tác.")
+            if not target_shift:
+                raise serializers.ValidationError("Tranh ca cần ca mục tiêu.")
+
         if partner and requester and partner == requester:
             raise serializers.ValidationError("Không thể tạo yêu cầu với chính mình.")
         if offered_shift and target_shift and offered_shift == target_shift:
             raise serializers.ValidationError("Ca đề xuất và ca mục tiêu không được giống nhau.")
+
+        from datetime import date
         if target_shift and target_shift.date < date.today():
             raise serializers.ValidationError("Không thể tạo yêu cầu cho ca đã diễn ra.")
+        if offered_shift and offered_shift.date < date.today():
+            raise serializers.ValidationError("Không thể đề xuất đổi/nhượng ca đã diễn ra.")
+
+        if requester and offered_shift:
+            assignment = ShiftAssignment.objects.filter(
+                shift=offered_shift, user=requester, status=ShiftAssignment.Status.CONFIRMED
+            ).first()
+            if not assignment:
+                 raise serializers.ValidationError("Bạn không được phân công hoặc chưa được xác nhận vào ca đề xuất.")
+
+        return data
