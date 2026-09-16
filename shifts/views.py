@@ -96,43 +96,20 @@ class ShiftViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=data)
         if serializer.is_valid():
             phones = request.data.get('phones', [])
-            users_to_assign = []
             
-            #  Kiểm tra số điện thoại 
-            if isinstance(phones, list) and phones:
-                users_to_assign = list(User.objects.filter(phone__in=phones))
-                found_phones = set(u.phone for u in users_to_assign)
-                missing_phones = set(phones) - found_phones
-                
-                if missing_phones:
-                    return Response({
-                        "detail": f"Không tìm thấy nhân viên với số điện thoại: {', '.join(missing_phones)}"
-                    }, status=status.HTTP_400_BAD_REQUEST)    
-            try:
-                with transaction.atomic():
-                    shift = serializer.save(created_by=request.user)
-                    
-                    # Phân công trực tiếp cho nhân viên theo số điện thoại
-                    if users_to_assign:
-                        for user in users_to_assign:
-                            ShiftAssignment.objects.get_or_create(
-                                shift=shift,
-                                user=user,
-                                defaults={
-                                    'assigned_by': request.user,
-                                    'status': ShiftAssignment.Status.CONFIRMED
-                                }
-                            )
-                            
-                        # Tự động đóng ca nếu đã phân công đủ người
-                        ShiftService.auto_update_shift_status(shift)
+            shift, error = ShiftService.create_emergency_shift(
+                validated_data=serializer.validated_data,
+                phones=phones,
+                creator=request.user
+            )
+            if error:
+                status_code = status.HTTP_500_INTERNAL_SERVER_ERROR if error.startswith("Lỗi hệ thống") else status.HTTP_400_BAD_REQUEST
+                return Response({"detail": error}, status=status_code)
 
-                    return Response({
-                        "message": "Tạo ca khẩn cấp thành công.",
-                        "shift": self.get_serializer(shift).data
-                    }, status=status.HTTP_201_CREATED)
-            except Exception as e:
-                return Response({"detail": f"Lỗi hệ thống: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({
+                "message": "Tạo ca khẩn cấp thành công.",
+                "shift": self.get_serializer(shift).data
+            }, status=status.HTTP_201_CREATED)
             
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -186,80 +163,37 @@ class ShiftViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def claim(self, request, pk=None):
         """Nhân viên đăng ký nguyện vọng nhận ca trống"""
-        try:
-            with transaction.atomic():
+        shift = self.get_object()
+        
+        assignment, error, is_auto_confirmed = ShiftService.employee_claim_shift(shift, request.user)
+        if error:
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR if error.startswith("Lỗi hệ thống") else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": error}, status=status_code)
 
-                shift = Shift.objects.select_for_update().get(pk=pk)
-                self.check_object_permissions(request, shift)
+        if is_auto_confirmed:
+            return Response({
+                "message": "Bạn đã nhận ca khẩn cấp thành công. Ca đã được tự động xác nhận.",
+                "assignment": ShiftAssignmentSerializer(assignment).data
+            }, status=status.HTTP_201_CREATED)
 
-                # 1. Không cho đăng ký ca đã qua hoặc đã kết thúc
-                if ShiftService.is_shift_ended(shift):
-                    return Response({
-                        "detail": "Ca làm việc này đã kết thúc, không thể đăng ký."
-                    }, status=status.HTTP_400_BAD_REQUEST)
-
-                # 2. Kiểm tra ca có đang mở không
-                if not shift.is_open:
-                    return Response({"detail": "Ca này không phải ca trống hoặc đã đủ người, không thể đăng ký."}, status=status.HTTP_400_BAD_REQUEST)
-
-                assignment, error = ShiftService.claim_open_shift(user=request.user, shift=shift, assigned_by=None)
-                if error:
-                    return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
-
-                # 3. Phê duyệt tự động nếu là ca khẩn cấp
-                if shift.is_emergency:
-                    assignment.status = ShiftAssignment.Status.CONFIRMED
-                    assignment.save()
-                    
-                    # Khóa ca nếu đã đủ người
-                    ShiftService.auto_update_shift_status(shift)
-                        
-                    return Response({
-                        "message": "Bạn đã nhận ca khẩn cấp thành công. Ca đã được tự động xác nhận.",
-                        "assignment": ShiftAssignmentSerializer(assignment).data
-                    }, status=status.HTTP_201_CREATED)
-
-                return Response({
-                    "message": "Đăng ký nguyện vọng thành công. Vui lòng chờ Admin duyệt.",
-                    "assignment": ShiftAssignmentSerializer(assignment).data
-                }, status=status.HTTP_201_CREATED)
-
-        except Shift.DoesNotExist:
-            return Response({"detail": "Không tìm thấy ca này."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "message": "Đăng ký nguyện vọng thành công. Vui lòng chờ Admin duyệt.",
+            "assignment": ShiftAssignmentSerializer(assignment).data
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path=r'assignments/(?P<assignment_id>\d+)/approve')
     def approve_claim(self, request, pk=None, assignment_id=None):
         """Admin duyệt nguyện vọng"""
-        try:
-            with transaction.atomic():
-                shift = Shift.objects.select_for_update().get(pk=pk)
-                self.check_object_permissions(request, shift)
-                
-                try:
-                    assignment = ShiftAssignment.objects.get(id=assignment_id, shift=shift, status=ShiftAssignment.Status.PENDING)
-                except ShiftAssignment.DoesNotExist:
-                    return Response({"detail": "Không tìm thấy nguyện vọng chờ duyệt."}, status=status.HTTP_404_NOT_FOUND)
+        shift = self.get_object()
+        
+        assignment, error = ShiftService.approve_shift_claim(shift, assignment_id, request.user)
+        if error:
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR if error.startswith("Lỗi hệ thống") else status.HTTP_400_BAD_REQUEST
+            if error == "Không tìm thấy nguyện vọng chờ duyệt.":
+                status_code = status.HTTP_404_NOT_FOUND
+            return Response({"detail": error}, status=status_code)
 
-                # Kiểm tra nhân viên có bị trùng ca cùng khung giờ không 
-                if ShiftService.has_overlapping_shift(assignment.user, shift, exclude_assignment_ids=[assignment.id]):
-                    return Response({"detail": f"{assignment.user.full_name} đã có ca trùng khung giờ trong ngày này."}, status=status.HTTP_400_BAD_REQUEST)
-
-                # Duyệt nguyện vọng này
-                assignment.status = ShiftAssignment.Status.CONFIRMED
-                assignment.assigned_by = request.user
-                assignment.save()
-
-                # Kiểm tra đã đủ max_workers chưa
-                is_open = ShiftService.auto_update_shift_status(shift)
-                if not is_open:
-                    ShiftAssignment.objects.filter(
-                        shift=shift,
-                        status=ShiftAssignment.Status.PENDING
-                    ).update(status=ShiftAssignment.Status.CANCELLED)
-
-                return Response({"message": f"Đã duyệt nguyện vọng của {assignment.user.full_name}."}, status=status.HTTP_200_OK)
-        except Shift.DoesNotExist:
-            return Response({"detail": "Không tìm thấy ca này."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"message": f"Đã duyệt nguyện vọng của {assignment.user.full_name}."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path=r'assignments/(?P<assignment_id>\d+)/reject')
     def reject_claim(self, request, pk=None, assignment_id=None):
@@ -365,113 +299,14 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminRole])
     def approve(self, request, pk=None):
         """Admin duyệt yêu cầu đổi/tranh/nhượng ca"""
-        try:
-            with transaction.atomic():
-                swap = ShiftSwapRequest.objects.select_for_update().get(pk=pk)
-                self.check_object_permissions(request, swap)
+        swap = self.get_object()
 
-                if swap.status != ShiftSwapRequest.Status.PARTNER_ACCEPTED:
-                    return Response({"detail": "Yêu cầu này không ở trạng thái chờ Admin duyệt."}, status=status.HTTP_400_BAD_REQUEST)
+        message, error = ShiftService.approve_swap_request(swap, request.user)
+        if error:
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR if error.startswith("Lỗi hệ thống") else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": error}, status=status_code)
 
-                # TH1: Đổi ca
-                if swap.swap_type == ShiftSwapRequest.SwapType.EXCHANGE and swap.offered_shift:
-                    if not swap.partner:
-                        return Response({"detail": "Yêu cầu đổi ca phải có người chấp nhận."}, status=status.HTTP_400_BAD_REQUEST)
-
-                    target_shift = swap.target_shift
-                    offered_shift = swap.offered_shift
-
-                    # Tìm assignment của NV A
-                    assignment_a = ShiftAssignment.objects.select_for_update().get(
-                        shift=offered_shift, user=swap.requester, status=ShiftAssignment.Status.CONFIRMED
-                    )
-                    # Tìm assignment của NV B (partner)
-                    assignment_b = ShiftAssignment.objects.select_for_update().get(
-                        shift=target_shift, user=swap.partner, status=ShiftAssignment.Status.CONFIRMED
-                    )
-
-                    # Kiểm tra NV A có trùng ca với target_shift không
-                    if ShiftService.has_overlapping_shift(swap.requester, target_shift, exclude_assignment_ids=[assignment_a.id]):
-                        raise ValueError(f"{swap.requester.full_name} bị trùng khung giờ với ca muốn đổi.")
-
-                    # Kiểm tra NV B có trùng ca với offered_shift không
-                    if ShiftService.has_overlapping_shift(swap.partner, offered_shift, exclude_assignment_ids=[assignment_b.id]):
-                        raise ValueError(f"{swap.partner.full_name} bị trùng khung giờ với ca được đổi sang.")
-
-                    assignment_a.user = swap.partner
-                    assignment_b.user = swap.requester
-                    assignment_a.save()
-                    assignment_b.save()
-
-                # TH2: Nhượng ca
-                elif swap.swap_type == ShiftSwapRequest.SwapType.TRANSFER and swap.offered_shift:
-                    if not swap.partner:
-                        return Response({"detail": "Yêu cầu nhượng ca phải có người nhận (partner)."}, 
-                                       status=status.HTTP_400_BAD_REQUEST)
-
-                    offered_shift = swap.offered_shift
-
-                    try:
-                        assignment_requester = ShiftAssignment.objects.select_for_update().get(
-                            shift=offered_shift,
-                            user=swap.requester,
-                            status=ShiftAssignment.Status.CONFIRMED
-                        )
-                    except ShiftAssignment.DoesNotExist:
-                        return Response({"detail": "Người nhượng không còn giữ ca này nữa."}, 
-                                    status=status.HTTP_400_BAD_REQUEST)
-
-                    if ShiftAssignment.objects.filter(
-                        shift=offered_shift,
-                        user=swap.partner,
-                        status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED]
-                    ).exists():
-                        return Response({"detail": f"{swap.partner.full_name} đã đăng ký hoặc đang giữ ca này rồi."}, 
-                                    status=status.HTTP_400_BAD_REQUEST)
-
-                    if ShiftService.has_overlapping_shift(swap.partner, offered_shift, exclude_shift=offered_shift):
-                        return Response({
-                            "detail": f"{swap.partner.full_name} đã có ca làm trùng khung giờ với ca được nhượng."
-                        }, status=status.HTTP_400_BAD_REQUEST)
-
-                    assignment_requester.status = ShiftAssignment.Status.CANCELLED
-                    assignment_requester.save()
-                    ShiftAssignment.objects.create(
-                        shift=offered_shift,
-                        user=swap.partner,
-                        assigned_by=request.user,
-                        status=ShiftAssignment.Status.CONFIRMED
-                    )
-
-                    ShiftService.auto_update_shift_status(offered_shift)
-
-                # TH3: Tranh ca
-                elif swap.swap_type == ShiftSwapRequest.SwapType.CLAIM:
-                    assignment, error = ShiftService.claim_open_shift(user=swap.requester, shift=swap.target_shift, assigned_by=request.user)
-                    if not assignment:
-                        return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
-
-                swap.status = ShiftSwapRequest.Status.ACCEPTED
-                swap.resolved_by = request.user
-                swap.resolved_at = timezone.now()
-                swap.save()
-
-                # Thông báo phản hồi chung
-                msg_map = {
-                    ShiftSwapRequest.SwapType.EXCHANGE: f"Đã duyệt đổi ca thành công giữa {swap.requester.full_name} và {swap.partner.full_name}.",
-                    ShiftSwapRequest.SwapType.TRANSFER: f"Đã duyệt nhượng ca thành công. {swap.partner.full_name} đã nhận thêm ca.",
-                    ShiftSwapRequest.SwapType.CLAIM: f"Đã duyệt tranh ca thành công cho {swap.requester.full_name}."
-                }
-                return Response({"message": msg_map.get(swap.swap_type, "Đã duyệt yêu cầu thành công.")}, status=status.HTTP_200_OK)
-
-        except ShiftSwapRequest.DoesNotExist:
-            return Response({"detail": "Không tìm thấy yêu cầu."}, status=status.HTTP_404_NOT_FOUND)
-        except ShiftAssignment.DoesNotExist:
-            return Response({"detail": "Một trong hai nhân viên không còn phân công tại ca này."}, status=status.HTTP_400_BAD_REQUEST)
-        except ValueError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({"detail": f"Lỗi hệ thống: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"message": message}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminRole])
     def reject(self, request, pk=None):
