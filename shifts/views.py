@@ -14,6 +14,7 @@ from .serializers import (
     ShiftSwapRequestSerializer,
 )
 from .services import ShiftService
+from notifications.services import NotificationService
 from django.db import transaction
 from django.db.models import Q
 User = get_user_model()
@@ -131,6 +132,8 @@ class ShiftViewSet(viewsets.ModelViewSet):
         if not assignment:
             return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
+        NotificationService.notify_shift_assigned(user, shift, request.user)
+
         return Response({
             "message": "Phân công nhân viên thành công.",
             "assignment": ShiftAssignmentSerializer(assignment).data
@@ -157,6 +160,12 @@ class ShiftViewSet(viewsets.ModelViewSet):
 
         # Mở lại ca trống nếu số người confirmed giảm dưới min_workers
         ShiftService.auto_update_shift_status(shift)
+
+        try:
+            unassigned_user = User.objects.get(id=user_id)
+            NotificationService.notify_shift_unassigned(unassigned_user, shift)
+        except User.DoesNotExist:
+            pass
 
         return Response({"message": "Hủy phân công thành công."}, status=status.HTTP_200_OK)
 
@@ -206,6 +215,9 @@ class ShiftViewSet(viewsets.ModelViewSet):
 
         assignment.status = ShiftAssignment.Status.CANCELLED
         assignment.save()
+
+        NotificationService.notify_claim_rejected(assignment)
+
         return Response({"message": f"Đã từ chối nguyện vọng của {assignment.user.full_name}."}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='my-shifts')
@@ -249,9 +261,10 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
         swap_type = serializer.validated_data.get('swap_type')
 
         if not partner or swap_type == ShiftSwapRequest.SwapType.CLAIM:
-            serializer.save(requester=user, status=ShiftSwapRequest.Status.PARTNER_ACCEPTED)
+            swap = serializer.save(requester=user, status=ShiftSwapRequest.Status.PARTNER_ACCEPTED)
         else:
-            serializer.save(requester=user, status=ShiftSwapRequest.Status.PENDING)
+            swap = serializer.save(requester=user, status=ShiftSwapRequest.Status.PENDING)
+            NotificationService.notify_swap_requested(swap)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='partner-accept')
     def partner_accept(self, request, pk=None):
@@ -269,6 +282,7 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
 
                 swap.status = ShiftSwapRequest.Status.PARTNER_ACCEPTED
                 swap.save()
+                NotificationService.notify_swap_partner_accepted(swap)
                 return Response({"message": "Bạn đã xác nhận đồng ý yêu cầu đổi/nhượng ca. Vui lòng chờ Admin duyệt."}, status=status.HTTP_200_OK)
         except ShiftSwapRequest.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -291,6 +305,7 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
                 swap.resolved_by = request.user
                 swap.resolved_at = timezone.now()
                 swap.save()
+                NotificationService.notify_swap_partner_rejected(swap)
                 return Response({"message": "Bạn đã từ chối yêu cầu đổi/nhượng ca."}, status=status.HTTP_200_OK)
         except ShiftSwapRequest.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -324,6 +339,8 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
                 swap.resolved_at = timezone.now()
                 swap.save()
 
+                NotificationService.notify_swap_rejected(swap)
+
                 return Response({"message": "Yêu cầu đổi ca đã bị từ chối."}, status=status.HTTP_200_OK)
         except ShiftSwapRequest.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -346,6 +363,8 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
                 swap.resolved_by = request.user
                 swap.resolved_at = timezone.now()
                 swap.save()
+
+                NotificationService.notify_swap_cancelled(swap)
 
                 return Response({"message": "Đã hủy yêu cầu thành công."}, status=status.HTTP_200_OK)
         except ShiftSwapRequest.DoesNotExist:
