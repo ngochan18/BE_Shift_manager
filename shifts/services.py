@@ -2,7 +2,8 @@ from datetime import date, datetime
 from django.utils import timezone
 from django.db import transaction
 from django.contrib.auth import get_user_model
-from .models import Shift, ShiftAssignment, ShiftSwapRequest    
+from .models import Shift, ShiftAssignment, ShiftSwapRequest
+from notifications.services import NotificationService
 
 class ShiftService:
     @staticmethod
@@ -142,7 +143,26 @@ class ShiftService:
                         )
                         
                     ShiftService.auto_update_shift_status(shift)
-                    
+
+                # Gửi thông báo ca khẩn cấp
+                if users_to_assign:
+                    NotificationService.notify_emergency_shift(users_to_assign, shift, is_assigned=True)
+                else:
+                    busy_user_ids = ShiftAssignment.objects.filter(
+                        status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED],
+                        shift__date=shift.date,
+                        shift__start_time__lt=shift.end_time,
+                        shift__end_time__gt=shift.start_time,
+                    ).values_list('user_id', flat=True)
+
+                    # Lấy ra danh sách các nhân viên đang rảnh
+                    available_employees = User.objects.filter(
+                        role=User.Role.EMPLOYEE, 
+                        is_active=True
+                    ).exclude(id__in=busy_user_ids)
+
+                    if available_employees.exists():
+                        NotificationService.notify_emergency_shift(available_employees, shift, is_assigned=False)
                 return shift, None
         except Exception as e:
             return None, f"Lỗi hệ thống: {str(e)}"
@@ -172,6 +192,9 @@ class ShiftService:
                     assignment.save()
                     ShiftService.auto_update_shift_status(locked_shift)
                     is_auto_confirmed = True
+                    NotificationService.notify_emergency_claimed(user, locked_shift)
+                else:
+                    NotificationService.notify_claim_pending(user, locked_shift)
 
                 return assignment, None, is_auto_confirmed
         except Exception as e:
@@ -207,6 +230,18 @@ class ShiftService:
                         shift=locked_shift,
                         status=ShiftAssignment.Status.PENDING
                     ).update(status=ShiftAssignment.Status.CANCELLED)
+
+                # Gửi thông báo
+                NotificationService.notify_claim_approved(assignment)
+
+                # Thông báo cho các nguyện vọng bị hủy
+                if not is_open:
+                    cancelled = ShiftAssignment.objects.filter(
+                        shift=locked_shift,
+                        status=ShiftAssignment.Status.CANCELLED
+                    ).select_related('user')
+                    for cancelled_assignment in cancelled:
+                        NotificationService.notify_claim_rejected(cancelled_assignment)
 
                 return assignment, None
         except Exception as e:
@@ -311,6 +346,9 @@ class ShiftService:
                     ShiftSwapRequest.SwapType.TRANSFER: f"Đã duyệt nhượng ca thành công. {locked_swap.partner.full_name} đã nhận thêm ca.",
                     ShiftSwapRequest.SwapType.CLAIM: f"Đã duyệt tranh ca thành công cho {locked_swap.requester.full_name}."
                 }
+                # Gửi thông báo cho cả hai bên
+                NotificationService.notify_swap_approved(locked_swap)
+
                 return msg_map.get(locked_swap.swap_type, "Đã duyệt yêu cầu thành công."), None
 
         except Exception as e:
