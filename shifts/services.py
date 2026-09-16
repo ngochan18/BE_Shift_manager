@@ -2,7 +2,7 @@ from datetime import date, datetime
 from django.utils import timezone
 from django.db import transaction
 from django.contrib.auth import get_user_model
-from .models import ShiftAssignment
+from .models import Shift, ShiftAssignment, ShiftSwapRequest    
 
 class ShiftService:
     @staticmethod
@@ -106,6 +106,212 @@ class ShiftService:
                         return None, "Bạn đã đăng ký hoặc đang chờ duyệt ca này rồi."
 
                 return assignment, None
+
+        except Exception as e:
+            return None, f"Lỗi hệ thống: {str(e)}"
+
+    @staticmethod
+    def create_emergency_shift(validated_data, phones, creator):
+        """
+        Tạo ca khẩn cấp và phân công nhân viên theo danh sách số điện thoại.
+        """
+        User = get_user_model()
+        
+        users_to_assign = []
+        if isinstance(phones, list) and phones:
+            users_to_assign = list(User.objects.filter(phone__in=phones))
+            found_phones = set(u.phone for u in users_to_assign)
+            missing_phones = set(phones) - found_phones
+            
+            if missing_phones:
+                return None, f"Không tìm thấy nhân viên với số điện thoại: {', '.join(missing_phones)}"
+
+        try:
+            with transaction.atomic():
+                shift = Shift.objects.create(created_by=creator, **validated_data)
+                
+                if users_to_assign:
+                    for user in users_to_assign:
+                        ShiftAssignment.objects.get_or_create(
+                            shift=shift,
+                            user=user,
+                            defaults={
+                                'assigned_by': creator,
+                                'status': ShiftAssignment.Status.CONFIRMED
+                            }
+                        )
+                        
+                    ShiftService.auto_update_shift_status(shift)
+                    
+                return shift, None
+        except Exception as e:
+            return None, f"Lỗi hệ thống: {str(e)}"
+
+    @staticmethod
+    def employee_claim_shift(shift, user):
+        """
+        Nhân viên đăng ký nhận ca trống
+        """
+        try:
+            with transaction.atomic():
+                locked_shift = Shift.objects.select_for_update().get(pk=shift.pk)
+
+                if ShiftService.is_shift_ended(locked_shift):
+                    return None, "Ca làm việc này đã kết thúc, không thể đăng ký.", False
+
+                if not locked_shift.is_open:
+                    return None, "Ca này không phải ca trống hoặc đã đủ người, không thể đăng ký.", False
+
+                assignment, error = ShiftService.claim_open_shift(user=user, shift=locked_shift, assigned_by=None)
+                if error:
+                    return None, error, False
+
+                is_auto_confirmed = False
+                if locked_shift.is_emergency:
+                    assignment.status = ShiftAssignment.Status.CONFIRMED
+                    assignment.save()
+                    ShiftService.auto_update_shift_status(locked_shift)
+                    is_auto_confirmed = True
+
+                return assignment, None, is_auto_confirmed
+        except Exception as e:
+            return None, f"Lỗi hệ thống: {str(e)}", False
+
+    @staticmethod
+    def approve_shift_claim(shift, assignment_id, admin_user):
+        """
+        Duyệt nguyện vọng đăng ký ca tự do.
+        """
+        try:
+            with transaction.atomic():
+                locked_shift = Shift.objects.select_for_update().get(pk=shift.pk)
+                
+                try:
+                    assignment = ShiftAssignment.objects.get(id=assignment_id, shift=locked_shift, status=ShiftAssignment.Status.PENDING)
+                except ShiftAssignment.DoesNotExist:
+                    return None, "Không tìm thấy nguyện vọng chờ duyệt."
+
+                # Kiểm tra nhân viên có bị trùng ca cùng khung giờ không 
+                if ShiftService.has_overlapping_shift(assignment.user, locked_shift, exclude_assignment_ids=[assignment.id]):
+                    return None, f"{assignment.user.full_name} đã có ca trùng khung giờ trong ngày này."
+
+                # Duyệt nguyện vọng này
+                assignment.status = ShiftAssignment.Status.CONFIRMED
+                assignment.assigned_by = admin_user
+                assignment.save()
+
+                # Kiểm tra đã đủ max_workers chưa
+                is_open = ShiftService.auto_update_shift_status(locked_shift)
+                if not is_open:
+                    ShiftAssignment.objects.filter(
+                        shift=locked_shift,
+                        status=ShiftAssignment.Status.PENDING
+                    ).update(status=ShiftAssignment.Status.CANCELLED)
+
+                return assignment, None
+        except Exception as e:
+            return None, f"Lỗi hệ thống: {str(e)}"
+
+    @staticmethod
+    def approve_swap_request(swap, admin_user):
+        """
+        Duyệt yêu cầu đổi/tranh/nhượng ca.
+        """
+        try:
+            with transaction.atomic():
+                locked_swap = ShiftSwapRequest.objects.select_for_update().get(pk=swap.pk)
+                
+                if locked_swap.status != ShiftSwapRequest.Status.PARTNER_ACCEPTED:
+                    return None, "Yêu cầu này không ở trạng thái chờ Admin duyệt."
+
+                # TH1: Đổi ca
+                if locked_swap.swap_type == ShiftSwapRequest.SwapType.EXCHANGE and locked_swap.offered_shift:
+                    if not locked_swap.partner:
+                        return None, "Yêu cầu đổi ca phải có người chấp nhận."
+
+                    target_shift = locked_swap.target_shift
+                    offered_shift = locked_swap.offered_shift
+
+                    try:
+                        # Tìm assignment của NV A
+                        assignment_a = ShiftAssignment.objects.select_for_update().get(
+                            shift=offered_shift, user=locked_swap.requester, status=ShiftAssignment.Status.CONFIRMED
+                        )
+                        # Tìm assignment của NV B (partner)
+                        assignment_b = ShiftAssignment.objects.select_for_update().get(
+                            shift=target_shift, user=locked_swap.partner, status=ShiftAssignment.Status.CONFIRMED
+                        )
+                    except ShiftAssignment.DoesNotExist:
+                        return None, "Một trong hai nhân viên không còn phân công tại ca này."
+
+                    # Kiểm tra NV A có trùng ca với target_shift không
+                    if ShiftService.has_overlapping_shift(locked_swap.requester, target_shift, exclude_assignment_ids=[assignment_a.id]):
+                        return None, f"{locked_swap.requester.full_name} bị trùng khung giờ với ca muốn đổi."
+
+                    # Kiểm tra NV B có trùng ca với offered_shift không
+                    if ShiftService.has_overlapping_shift(locked_swap.partner, offered_shift, exclude_assignment_ids=[assignment_b.id]):
+                        return None, f"{locked_swap.partner.full_name} bị trùng khung giờ với ca được đổi sang."
+
+                    assignment_a.user = locked_swap.partner
+                    assignment_b.user = locked_swap.requester
+                    assignment_a.save()
+                    assignment_b.save()
+
+                # TH2: Nhượng ca
+                elif locked_swap.swap_type == ShiftSwapRequest.SwapType.TRANSFER and locked_swap.offered_shift:
+                    if not locked_swap.partner:
+                        return None, "Yêu cầu nhượng ca phải có người nhận (partner)."
+
+                    offered_shift = locked_swap.offered_shift
+
+                    try:
+                        assignment_requester = ShiftAssignment.objects.select_for_update().get(
+                            shift=offered_shift,
+                            user=locked_swap.requester,
+                            status=ShiftAssignment.Status.CONFIRMED
+                        )
+                    except ShiftAssignment.DoesNotExist:
+                        return None, "Người nhượng không còn giữ ca này nữa."
+
+                    if ShiftAssignment.objects.filter(
+                        shift=offered_shift,
+                        user=locked_swap.partner,
+                        status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED]
+                    ).exists():
+                        return None, f"{locked_swap.partner.full_name} đã đăng ký hoặc đang giữ ca này rồi."
+
+                    if ShiftService.has_overlapping_shift(locked_swap.partner, offered_shift, exclude_shift=offered_shift):
+                        return None, f"{locked_swap.partner.full_name} đã có ca làm trùng khung giờ với ca được nhượng."
+
+                    assignment_requester.status = ShiftAssignment.Status.CANCELLED
+                    assignment_requester.save()
+                    ShiftAssignment.objects.create(
+                        shift=offered_shift,
+                        user=locked_swap.partner,
+                        assigned_by=admin_user,
+                        status=ShiftAssignment.Status.CONFIRMED
+                    )
+
+                    ShiftService.auto_update_shift_status(offered_shift)
+
+                # TH3: Tranh ca
+                elif locked_swap.swap_type == ShiftSwapRequest.SwapType.CLAIM:
+                    assignment, error = ShiftService.claim_open_shift(user=locked_swap.requester, shift=locked_swap.target_shift, assigned_by=admin_user)
+                    if not assignment:
+                        return None, error
+
+                locked_swap.status = ShiftSwapRequest.Status.ACCEPTED
+                locked_swap.resolved_by = admin_user
+                locked_swap.resolved_at = timezone.now()
+                locked_swap.save()
+
+                # Thông báo phản hồi chung
+                msg_map = {
+                    ShiftSwapRequest.SwapType.EXCHANGE: f"Đã duyệt đổi ca thành công giữa {locked_swap.requester.full_name} và {locked_swap.partner.full_name}.",
+                    ShiftSwapRequest.SwapType.TRANSFER: f"Đã duyệt nhượng ca thành công. {locked_swap.partner.full_name} đã nhận thêm ca.",
+                    ShiftSwapRequest.SwapType.CLAIM: f"Đã duyệt tranh ca thành công cho {locked_swap.requester.full_name}."
+                }
+                return msg_map.get(locked_swap.swap_type, "Đã duyệt yêu cầu thành công."), None
 
         except Exception as e:
             return None, f"Lỗi hệ thống: {str(e)}"
