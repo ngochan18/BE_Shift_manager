@@ -1,3 +1,152 @@
-from django.shortcuts import render
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
-# Create your views here.
+from django.contrib.auth import get_user_model
+from shifts.models import Shift
+from .models import CheckInRecord
+from .serializers import (
+    QRTokenSerializer,
+    CheckInSerializer,
+    CheckOutSerializer,
+    CheckInRecordSerializer,
+)
+from .services import AttendanceService
+
+User = get_user_model()
+
+
+def _is_admin_or_manager(user):
+    return user.role in ("admin", "manager")
+
+
+class QRTokenViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['post'], url_path='shift/(?P<shift_id>\d+)/generate')
+    def generate_qr(self, request, shift_id=None):
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Chỉ Admin/Manager mới được tạo QR."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            shift = Shift.objects.select_related("store").get(pk=shift_id)
+        except Shift.DoesNotExist:
+            return Response({"detail": "Không tìm thấy ca làm việc."}, status=status.HTTP_404_NOT_FOUND)
+
+        qr, error = AttendanceService.generate_qr_token(shift, request.user)
+        if error:
+            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(QRTokenSerializer(qr).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['get'], url_path='shift/(?P<shift_id>\d+)/list')
+    def list_qr(self, request, shift_id=None):
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Chỉ Admin/Manager mới được xem QR."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            shift = Shift.objects.get(pk=shift_id)
+        except Shift.DoesNotExist:
+            return Response({"detail": "Không tìm thấy ca làm việc."}, status=status.HTTP_404_NOT_FOUND)
+
+        tokens = AttendanceService.list_qr_tokens(shift)
+        return Response(QRTokenSerializer(tokens, many=True).data)
+
+
+class AttendanceRecordViewSet(viewsets.GenericViewSet):
+    """
+    ViewSet xử lý Check-in, Check-out và tra cứu lịch sử chấm công.
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = CheckInRecord.objects.all()
+    serializer_class = CheckInRecordSerializer
+
+    @action(detail=False, methods=['post'])
+    def checkin(self, request):
+        serializer = CheckInSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        record, message = AttendanceService.checkin(
+            user=request.user,
+            token_str=data["token"],
+            latitude=data.get("latitude"),
+            longitude=data.get("longitude"),
+        )
+
+        if record is None:
+            return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_data = self.get_serializer(record).data
+        if message:
+            response_data["warning"] = message
+
+        return Response(response_data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'])
+    def checkout(self, request):
+        serializer = CheckOutSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        record, error = AttendanceService.checkout(
+            user=request.user,
+            shift_id=data["shift_id"],
+            note=data.get("note", ""),
+        )
+
+        if error:
+            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(self.get_serializer(record).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'])
+    def me(self, request):
+        """Lịch sử check-in cá nhân"""
+        date_from = request.query_params.get("from")
+        date_to = request.query_params.get("to")
+
+        records = AttendanceService.get_records_for_user(
+            user=request.user,
+            shift_date_from=date_from,
+            shift_date_to=date_to,
+        )
+        return Response(self.get_serializer(records, many=True).data)
+
+    @action(detail=False, methods=['get'], url_path='shift/(?P<shift_id>\d+)')
+    def shift_records(self, request, shift_id=None):
+        """Danh sách đã check-in trong một ca làm việc (Admin)"""
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Không có quyền truy cập."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            shift = Shift.objects.get(pk=shift_id)
+        except Shift.DoesNotExist:
+            return Response({"detail": "Không tìm thấy ca làm việc."}, status=status.HTTP_404_NOT_FOUND)
+
+        records = AttendanceService.get_records_for_shift(shift)
+        return Response(self.get_serializer(records, many=True).data)
+
+    @action(detail=False, methods=['get'], url_path='user/(?P<user_id>\d+)')
+    def user_records(self, request, user_id=None):
+        """Lịch sử đi làm của một nhân viên (Admin)"""
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Không có quyền truy cập."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            target_user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response({"detail": "Không tìm thấy nhân viên."}, status=status.HTTP_404_NOT_FOUND)
+
+        date_from = request.query_params.get("from")
+        date_to = request.query_params.get("to")
+
+        records = AttendanceService.get_records_for_user(
+            user=target_user,
+            shift_date_from=date_from,
+            shift_date_to=date_to,
+        )
+        return Response(self.get_serializer(records, many=True).data)

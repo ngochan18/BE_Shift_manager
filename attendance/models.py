@@ -33,9 +33,14 @@ class CheckInRecord(models.Model):
     # QR
     qr_token_used = models.CharField(max_length=255, blank=True)
     checkin_method = models.CharField(max_length=20, default="qr_gps")
-    is_valid = models.BooleanField(default=True)
+    geo_valid = models.BooleanField(default=True)  # True = check-in trong phạm vi 
+    late_minutes = models.PositiveIntegerField(default=0)  # 0 = đúng giờ
     worked_minutes = models.PositiveIntegerField(null=True, blank=True)
     note = models.TextField(blank=True)
+
+    @property
+    def is_late(self):
+        return self.late_minutes > 0
 
     class Meta:
         db_table = "check_in_records"
