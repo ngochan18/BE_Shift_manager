@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 from django.conf import settings
 from shifts.models import Shift
@@ -10,6 +11,11 @@ class QRToken(models.Model):
     generated_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     is_used = models.BooleanField(default=False)
+
+    def save(self, *args, **kwargs):
+        if not self.token:
+            self.token = str(uuid.uuid4())
+        super().save(*args, **kwargs)
 
     class Meta:
         db_table = "qr_tokens"
