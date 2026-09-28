@@ -1,5 +1,9 @@
 # Environment variables
 .env
+
+# Firebase service account credentials
+firebase-credentials.json
+*serviceAccountKey*.json
 .venv/
 env/
 venv/

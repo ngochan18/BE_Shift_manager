@@ -76,8 +76,8 @@ class EmployeeProfileUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'phone', 'email', 'full_name', 'avatar_url', 'profile']
-        read_only_fields = ['id', 'phone']
+        fields = ['id', 'phone', 'email', 'full_name', 'role', 'avatar_url', 'profile']
+        read_only_fields = ['id', 'phone', 'role']
 
     def update(self, instance, validated_data):
         profile_data = validated_data.pop('profile', None)
