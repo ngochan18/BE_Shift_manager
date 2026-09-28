@@ -153,6 +153,9 @@ REST_FRAMEWORK = {
     ),
 }
 
+# Firebase Admin SDK
+FIREBASE_CREDENTIALS_PATH = os.getenv('FIREBASE_CREDENTIALS_PATH', '')
+
 # SimpleJWT
 from datetime import timedelta
 SIMPLE_JWT = {
