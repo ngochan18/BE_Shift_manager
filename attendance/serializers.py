@@ -49,7 +49,7 @@ class CheckInRecordSerializer(serializers.ModelSerializer):
     shift_end = serializers.TimeField(source="shift.end_time", read_only=True)
     store_name = serializers.CharField(source="shift.store.name", read_only=True)
 
-    is_late = serializers.BooleanField(source="is_late", read_only=True)
+    is_late = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = CheckInRecord
