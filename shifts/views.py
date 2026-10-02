@@ -74,7 +74,7 @@ class ShiftViewSet(viewsets.ModelViewSet):
         return qs
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve', 'my_shifts', 'claim']:
+        if self.action in ['list', 'retrieve', 'my_shifts', 'claim', 'swap_candidates']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsAdminRole()]
 
@@ -237,6 +237,45 @@ class ShiftViewSet(viewsets.ModelViewSet):
 
         serializer = ShiftSerializer(qs, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='swap-candidates')
+    def swap_candidates(self, request):
+        """Danh sách ca có nhân viên khác được phân công — để tìm đối tác đổi ca"""
+        from_date = request.query_params.get('from', str(timezone.now().date()))
+        to_date = request.query_params.get('to')
+        employee_id = request.query_params.get('employee')
+
+        qs = Shift.objects.prefetch_related('assignments__user').filter(
+            date__gte=from_date,
+            assignments__status=ShiftAssignment.Status.CONFIRMED,
+        ).distinct().order_by('date', 'start_time')
+
+        if to_date:
+            qs = qs.filter(date__lte=to_date)
+        if employee_id:
+            qs = qs.filter(assignments__user_id=employee_id, assignments__status=ShiftAssignment.Status.CONFIRMED)
+
+        data = []
+        for shift in qs:
+            confirmed = [
+                a for a in shift.assignments.all()
+                if a.status == ShiftAssignment.Status.CONFIRMED and str(a.user_id) != str(request.user.id)
+            ]
+            if employee_id:
+                confirmed = [a for a in confirmed if str(a.user_id) == str(employee_id)]
+            if confirmed:
+                data.append({
+                    'id': shift.id,
+                    'date': str(shift.date),
+                    'start_time': str(shift.start_time)[:5],
+                    'end_time': str(shift.end_time)[:5],
+                    'employees': [
+                        {'id': a.user.id, 'full_name': a.user.full_name, 'phone': a.user.phone}
+                        for a in confirmed
+                    ],
+                })
+
+        return Response(data)
 
 
 class ShiftSwapRequestViewSet(viewsets.ModelViewSet):

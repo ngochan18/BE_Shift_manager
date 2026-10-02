@@ -287,10 +287,19 @@ class ShiftService:
                     if ShiftService.has_overlapping_shift(locked_swap.partner, offered_shift, exclude_assignment_ids=[assignment_b.id]):
                         return None, f"{locked_swap.partner.full_name} bị trùng khung giờ với ca được đổi sang."
 
-                    assignment_a.user = locked_swap.partner
-                    assignment_b.user = locked_swap.requester
+                    assignment_a.status = ShiftAssignment.Status.CANCELLED
                     assignment_a.save()
+                    assignment_b.status = ShiftAssignment.Status.CANCELLED
                     assignment_b.save()
+
+                    ShiftAssignment.objects.update_or_create(
+                        shift=offered_shift, user=locked_swap.partner,
+                        defaults={'assigned_by': admin_user, 'status': ShiftAssignment.Status.CONFIRMED}
+                    )
+                    ShiftAssignment.objects.update_or_create(
+                        shift=target_shift, user=locked_swap.requester,
+                        defaults={'assigned_by': admin_user, 'status': ShiftAssignment.Status.CONFIRMED}
+                    )
 
                 # TH2: Nhượng ca
                 elif locked_swap.swap_type == ShiftSwapRequest.SwapType.TRANSFER and locked_swap.offered_shift:
@@ -320,11 +329,13 @@ class ShiftService:
 
                     assignment_requester.status = ShiftAssignment.Status.CANCELLED
                     assignment_requester.save()
-                    ShiftAssignment.objects.create(
+                    ShiftAssignment.objects.update_or_create(
                         shift=offered_shift,
                         user=locked_swap.partner,
-                        assigned_by=admin_user,
-                        status=ShiftAssignment.Status.CONFIRMED
+                        defaults={
+                            'assigned_by': admin_user,
+                            'status': ShiftAssignment.Status.CONFIRMED,
+                        }
                     )
 
                     ShiftService.auto_update_shift_status(offered_shift)

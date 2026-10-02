@@ -27,6 +27,11 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsAdminRole]
     authentication_classes = [JWTAuthentication]
 
+    def get_permissions(self):
+        if self.action == 'lookup':
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsAdminRole()]
+
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         instance.is_active = False
@@ -39,6 +44,19 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         instance.is_active = True
         instance.save()
         return Response({"message": "Mở khóa tài khoản thành công"}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='lookup')
+    def lookup(self, request):
+        phone = request.query_params.get('phone', '').strip()
+        if not phone:
+            return Response({'error': 'Vui lòng nhập số điện thoại.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            employee = User.objects.get(phone=phone, is_active=True)
+            if employee == request.user:
+                return Response({'error': 'Không thể tìm chính mình.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'id': employee.id, 'full_name': employee.full_name, 'phone': employee.phone})
+        except User.DoesNotExist:
+            return Response({'error': 'Không tìm thấy nhân viên với số điện thoại này.'}, status=status.HTTP_404_NOT_FOUND)
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):

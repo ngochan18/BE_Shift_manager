@@ -35,6 +35,12 @@ class ShiftSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_by', 'created_at']
 
 
+class ShiftBriefSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Shift
+        fields = ['id', 'date', 'start_time', 'end_time']
+
+
 class AssignSerializer(serializers.Serializer):
     user_id = serializers.IntegerField()
 
@@ -42,12 +48,14 @@ class AssignSerializer(serializers.Serializer):
 class ShiftSwapRequestSerializer(serializers.ModelSerializer):
     requester_name = serializers.CharField(source='requester.full_name', read_only=True)
     partner_name = serializers.CharField(source='partner.full_name', read_only=True)
+    offered_shift_data = ShiftBriefSerializer(source='offered_shift', read_only=True)
+    target_shift_data = ShiftBriefSerializer(source='target_shift', read_only=True)
 
     class Meta:
         model = ShiftSwapRequest
         fields = [
             'id', 'swap_type', 'requester', 'requester_name', 'partner', 'partner_name',
-            'target_shift', 'offered_shift', 'status',
+            'target_shift', 'target_shift_data', 'offered_shift', 'offered_shift_data', 'status',
             'message', 'expires_at', 'created_at', 'updated_at',
             'resolved_by', 'resolved_at'
         ]
