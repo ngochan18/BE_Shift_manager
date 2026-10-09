@@ -42,7 +42,7 @@ class ShiftViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         user = self.request.user
 
-        if self.action == 'list' and hasattr(user, 'role') and user.role != 'admin':
+        if self.action == 'list' and hasattr(user, 'role') and user.role not in ('admin', 'manager'):
             now = timezone.now()
             today = now.date()
             current_time = now.time()
@@ -74,7 +74,7 @@ class ShiftViewSet(viewsets.ModelViewSet):
         return qs
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve', 'my_shifts', 'claim']:
+        if self.action in ['list', 'retrieve', 'my_shifts', 'claim', 'swap_candidates']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsAdminRole()]
 
@@ -150,16 +150,17 @@ class ShiftViewSet(viewsets.ModelViewSet):
         if not user_id:
             return Response({"detail": "Vui lòng cung cấp user_id."}, status=status.HTTP_400_BAD_REQUEST)
 
-        updated = ShiftAssignment.objects.filter(
-            shift=shift,
-            user_id=user_id,
-            status=ShiftAssignment.Status.CONFIRMED
-        ).update(status=ShiftAssignment.Status.CANCELLED)
-        if not updated:
-            return Response({"detail": "Không tìm thấy phân công này."}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            locked_shift = Shift.objects.select_for_update().get(pk=shift.pk)
+            updated = ShiftAssignment.objects.filter(
+                shift=locked_shift,
+                user_id=user_id,
+                status=ShiftAssignment.Status.CONFIRMED
+            ).update(status=ShiftAssignment.Status.CANCELLED)
+            if not updated:
+                return Response({"detail": "Không tìm thấy phân công này."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Mở lại ca trống nếu số người confirmed giảm dưới min_workers
-        ShiftService.auto_update_shift_status(shift)
+            ShiftService.auto_update_shift_status(locked_shift)
 
         try:
             unassigned_user = User.objects.get(id=user_id)
@@ -238,6 +239,45 @@ class ShiftViewSet(viewsets.ModelViewSet):
         serializer = ShiftSerializer(qs, many=True)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['get'], url_path='swap-candidates')
+    def swap_candidates(self, request):
+        """Danh sách ca có nhân viên khác được phân công — để tìm đối tác đổi ca"""
+        from_date = request.query_params.get('from', str(timezone.now().date()))
+        to_date = request.query_params.get('to')
+        employee_id = request.query_params.get('employee')
+
+        qs = Shift.objects.prefetch_related('assignments__user').filter(
+            date__gte=from_date,
+            assignments__status=ShiftAssignment.Status.CONFIRMED,
+        ).distinct().order_by('date', 'start_time')
+
+        if to_date:
+            qs = qs.filter(date__lte=to_date)
+        if employee_id:
+            qs = qs.filter(assignments__user_id=employee_id, assignments__status=ShiftAssignment.Status.CONFIRMED)
+
+        data = []
+        for shift in qs:
+            confirmed = [
+                a for a in shift.assignments.all()
+                if a.status == ShiftAssignment.Status.CONFIRMED and str(a.user_id) != str(request.user.id)
+            ]
+            if employee_id:
+                confirmed = [a for a in confirmed if str(a.user_id) == str(employee_id)]
+            if confirmed:
+                data.append({
+                    'id': shift.id,
+                    'date': str(shift.date),
+                    'start_time': str(shift.start_time)[:5],
+                    'end_time': str(shift.end_time)[:5],
+                    'employees': [
+                        {'id': a.user.id, 'full_name': a.user.full_name, 'phone': a.user.phone}
+                        for a in confirmed
+                    ],
+                })
+
+        return Response(data)
+
 
 class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
     """Quản lý yêu cầu đổi / tranh ca"""
@@ -248,7 +288,7 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if hasattr(user, 'role') and user.role == 'admin':
+        if hasattr(user, 'role') and user.role in ('admin', 'manager'):
             return ShiftSwapRequest.objects.all().order_by('-created_at')
         return ShiftSwapRequest.objects.filter(Q(requester=user) | Q(partner=user)).order_by('-created_at')
     def get_permissions(self):
