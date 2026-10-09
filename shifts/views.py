@@ -42,7 +42,7 @@ class ShiftViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         user = self.request.user
 
-        if self.action == 'list' and hasattr(user, 'role') and user.role != 'admin':
+        if self.action == 'list' and hasattr(user, 'role') and user.role not in ('admin', 'manager'):
             now = timezone.now()
             today = now.date()
             current_time = now.time()
@@ -150,16 +150,17 @@ class ShiftViewSet(viewsets.ModelViewSet):
         if not user_id:
             return Response({"detail": "Vui lòng cung cấp user_id."}, status=status.HTTP_400_BAD_REQUEST)
 
-        updated = ShiftAssignment.objects.filter(
-            shift=shift,
-            user_id=user_id,
-            status=ShiftAssignment.Status.CONFIRMED
-        ).update(status=ShiftAssignment.Status.CANCELLED)
-        if not updated:
-            return Response({"detail": "Không tìm thấy phân công này."}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            locked_shift = Shift.objects.select_for_update().get(pk=shift.pk)
+            updated = ShiftAssignment.objects.filter(
+                shift=locked_shift,
+                user_id=user_id,
+                status=ShiftAssignment.Status.CONFIRMED
+            ).update(status=ShiftAssignment.Status.CANCELLED)
+            if not updated:
+                return Response({"detail": "Không tìm thấy phân công này."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Mở lại ca trống nếu số người confirmed giảm dưới min_workers
-        ShiftService.auto_update_shift_status(shift)
+            ShiftService.auto_update_shift_status(locked_shift)
 
         try:
             unassigned_user = User.objects.get(id=user_id)
@@ -287,7 +288,7 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if hasattr(user, 'role') and user.role == 'admin':
+        if hasattr(user, 'role') and user.role in ('admin', 'manager'):
             return ShiftSwapRequest.objects.all().order_by('-created_at')
         return ShiftSwapRequest.objects.filter(Q(requester=user) | Q(partner=user)).order_by('-created_at')
     def get_permissions(self):

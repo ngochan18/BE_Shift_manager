@@ -225,23 +225,27 @@ class ShiftService:
 
                 # Kiểm tra đã đủ max_workers chưa
                 is_open = ShiftService.auto_update_shift_status(locked_shift)
-                if not is_open:
-                    ShiftAssignment.objects.filter(
-                        shift=locked_shift,
-                        status=ShiftAssignment.Status.PENDING
-                    ).update(status=ShiftAssignment.Status.CANCELLED)
 
-                # Gửi thông báo
+                # Gửi thông báo duyệt trước khi cancel các nguyện vọng còn lại
                 NotificationService.notify_claim_approved(assignment)
 
-                # Thông báo cho các nguyện vọng bị hủy
                 if not is_open:
-                    cancelled = ShiftAssignment.objects.filter(
+                    # Lấy ID các nguyện vọng PENDING còn lại trước khi cancel
+                    pending_ids = list(ShiftAssignment.objects.filter(
                         shift=locked_shift,
-                        status=ShiftAssignment.Status.CANCELLED
-                    ).select_related('user')
-                    for cancelled_assignment in cancelled:
-                        NotificationService.notify_claim_rejected(cancelled_assignment)
+                        status=ShiftAssignment.Status.PENDING
+                    ).values_list('id', flat=True))
+
+                    if pending_ids:
+                        ShiftAssignment.objects.filter(id__in=pending_ids).update(
+                            status=ShiftAssignment.Status.CANCELLED
+                        )
+                        # Chỉ thông báo cho đúng những người vừa bị cancel lần này
+                        newly_cancelled = ShiftAssignment.objects.filter(
+                            id__in=pending_ids
+                        ).select_related('user')
+                        for ca in newly_cancelled:
+                            NotificationService.notify_claim_rejected(ca)
 
                 return assignment, None
         except Exception as e:
