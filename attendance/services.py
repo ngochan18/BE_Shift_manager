@@ -102,6 +102,12 @@ class AttendanceService:
                 )
                 geo_valid = distance <= store.geo_radius_meters
 
+                if not geo_valid:
+                    return None, (
+                        f"Vị trí của bạn quá xa cửa hàng ({distance}m, giới hạn {store.geo_radius_meters}m). "
+                        f"Vui lòng đến gần cửa hàng để check-in."
+                    )
+
                 if record is None:
                     try:
                         record = CheckInRecord.objects.create(
@@ -119,14 +125,7 @@ class AttendanceService:
                     except IntegrityError:
                         return None, "Bạn đã check-in ca này rồi."
 
-                warning = None
-                if not geo_valid:
-                    warning = (
-                        f"Check-in thành công nhưng bạn đang ở ngoài phạm vi cửa hàng "
-                        f"({distance}m > {store.geo_radius_meters}m). Vui lòng liên hệ quản lý."
-                    )
-
-                return record, warning
+                return record, None
 
         except Exception as e:
             return None, f"Lỗi hệ thống: {str(e)}"
