@@ -216,6 +216,22 @@ class NotificationService:
         )
 
     @staticmethod
+    def notify_checkin_success(user, shift, late_minutes=0):
+        """Thông báo check-in thành công, kèm cảnh báo nếu đi trễ."""
+        time_range = f"{shift.start_time.strftime('%H:%M')}-{shift.end_time.strftime('%H:%M')}"
+        if late_minutes > 0:
+            msg = f"Bạn đã check-in ca {time_range} ngày {shift.date.strftime('%d/%m/%Y')} (trễ {late_minutes} phút)."
+        else:
+            msg = f"Bạn đã check-in ca {time_range} ngày {shift.date.strftime('%d/%m/%Y')} đúng giờ."
+        NotificationService.send(
+            user=user,
+            notification_type=Notification.Type.CHECKIN_SUCCESS,
+            title="✅ Check-in thành công",
+            message=msg,
+            related_shift=shift,
+        )
+
+    @staticmethod
     def notify_swap_cancelled(swap):
         """Thông báo đối tác khi NV A hủy yêu cầu."""
         if not swap.partner:

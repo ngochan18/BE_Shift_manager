@@ -17,6 +17,7 @@ class Notification(models.Model):
         SWAP_APPROVED        = "swap_approved",        "Admin đã duyệt yêu cầu"
         SWAP_REJECTED        = "swap_rejected",        "Admin đã từ chối yêu cầu"
         SWAP_CANCELLED       = "swap_cancelled",       "Yêu cầu đã bị hủy"
+        CHECKIN_SUCCESS      = "checkin_success",      "Check-in thành công"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,

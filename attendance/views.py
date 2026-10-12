@@ -128,9 +128,10 @@ class AttendanceRecordViewSet(viewsets.GenericViewSet):
             return Response({"detail": "Không tìm thấy ca làm việc."}, status=status.HTTP_404_NOT_FOUND)
 
         records = AttendanceService.get_records_for_shift(shift)
+        
         return Response(self.get_serializer(records, many=True).data)
 
-    @action(detail=False, methods=['get'], url_path='user/(?P<user_id>\d+)')
+    @action(detail=False, methods=['get'], url_path=r'user/(?P<user_id>\d+)')
     def user_records(self, request, user_id=None):
         """Lịch sử đi làm của một nhân viên (Admin)"""
         if not _is_admin_or_manager(request.user):
