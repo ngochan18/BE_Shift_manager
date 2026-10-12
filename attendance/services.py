@@ -7,6 +7,7 @@ from django.db import transaction, IntegrityError
 
 from shifts.models import Shift, ShiftAssignment
 from .models import QRToken, CheckInRecord
+from notifications.services import NotificationService
 
 
 QR_VALID_MINUTES = 2           # Mỗi QR chỉ có hiệu lực trong 2 phút
@@ -125,6 +126,7 @@ class AttendanceService:
                     except IntegrityError:
                         return None, "Bạn đã check-in ca này rồi."
 
+                NotificationService.notify_checkin_success(user, shift, late_minutes)
                 return record, None
 
         except Exception as e:
