@@ -30,7 +30,7 @@ class CheckInRecord(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     checkin_at = models.DateTimeField(null=True, blank=True)
     checkout_at = models.DateTimeField(null=True, blank=True)
-    
+
     # Geofencing
     checkin_lat = models.DecimalField(max_digits=10, decimal_places=8, null=True)
     checkin_lng = models.DecimalField(max_digits=11, decimal_places=8, null=True)
@@ -39,10 +39,23 @@ class CheckInRecord(models.Model):
     # QR
     qr_token_used = models.CharField(max_length=255, blank=True)
     checkin_method = models.CharField(max_length=20, default="qr_gps")
-    geo_valid = models.BooleanField(default=True)  # True = check-in trong phạm vi 
-    late_minutes = models.PositiveIntegerField(default=0)  # 0 = đúng giờ
+    geo_valid = models.BooleanField(default=True)    # True = check-in trong phạm vi
+    late_minutes = models.PositiveIntegerField(default=0)   # 0 = đúng giờ
+    early_minutes = models.PositiveIntegerField(default=0)  # Số phút check-in sớm hơn start_time
     worked_minutes = models.PositiveIntegerField(null=True, blank=True)
     note = models.TextField(blank=True)
+
+    # Auto checkout (hệ thống tự động checkout)
+    auto_checkout = models.BooleanField(default=False)
+    effective_checkin_at = models.DateTimeField(null=True, blank=True)  # Giờ tính lương thực tế
+
+    # Manual override bởi admin/manager
+    is_manual_override = models.BooleanField(default=False)
+    overridden_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="overridden_checkins"
+    )
+    override_reason = models.TextField(blank=True)
 
     @property
     def is_late(self):
@@ -50,7 +63,7 @@ class CheckInRecord(models.Model):
 
     class Meta:
         db_table = "check_in_records"
-        unique_together = ["shift", "user"]
+        unique_together = [["shift", "user"]]
         indexes = [models.Index(fields=["user", "shift"])]
 
     def __str__(self):

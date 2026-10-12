@@ -151,3 +151,15 @@ class AttendanceRecordViewSet(viewsets.GenericViewSet):
             shift_date_to=date_to,
         )
         return Response(self.get_serializer(records, many=True).data)
+
+    @action(detail=False, methods=['post'], url_path='force-checkout-all')
+    def force_checkout_all(self, request):
+        """Ép checkout toàn bộ các ca làm việc đã kết thúc (Admin/Manager)"""
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Không có quyền truy cập."}, status=status.HTTP_403_FORBIDDEN)
+
+        count = AttendanceService.force_checkout_all(request.user)
+        return Response({
+            "detail": f"Đã chốt thành công {count} ca làm việc chưa check-out.",
+            "count": count
+        }, status=status.HTTP_200_OK)

@@ -109,22 +109,20 @@ class AttendanceService:
                         f"Vui lòng đến gần cửa hàng để check-in."
                     )
 
-                if record is None:
-                    try:
-                        record = CheckInRecord.objects.create(
-                            shift=shift,
-                            user=user,
-                            checkin_at=now,
-                            checkin_lat=latitude,
-                            checkin_lng=longitude,
-                            checkin_distance_meters=distance,
-                            qr_token_used=token_str,
-                            checkin_method="qr_gps",
-                            geo_valid=geo_valid,
-                            late_minutes=late_minutes,
-                        )
-                    except IntegrityError:
-                        return None, "Bạn đã check-in ca này rồi."
+                record, created = CheckInRecord.objects.update_or_create(
+                    shift=shift,
+                    user=user,
+                    defaults={
+                        "checkin_at": now,
+                        "checkin_lat": latitude,
+                        "checkin_lng": longitude,
+                        "checkin_distance_meters": distance,
+                        "qr_token_used": token_str,
+                        "checkin_method": "qr_gps",
+                        "geo_valid": geo_valid,
+                        "late_minutes": late_minutes,
+                    },
+                )
 
                 NotificationService.notify_checkin_success(user, shift, late_minutes)
                 return record, None
@@ -193,3 +191,32 @@ class AttendanceService:
         if shift_date_to:
             qs = qs.filter(shift__date__lte=shift_date_to)
         return qs.order_by("-shift__date", "-checkin_at")
+
+    @staticmethod
+    def force_checkout_all(admin_user):
+        """
+        Ép checkout toàn bộ các record chưa checkout có ca làm việc đã kết thúc.
+        """
+        now = timezone.now()
+        pending_records = CheckInRecord.objects.filter(
+            checkin_at__isnull=False,
+            checkout_at__isnull=True
+        ).select_related("shift")
+
+        checked_out_count = 0
+        with transaction.atomic():
+            for record in pending_records:
+                shift = record.shift
+                shift_end_dt = timezone.make_aware(
+                    datetime.combine(shift.date, shift.end_time)
+                )
+                if now > shift_end_dt:
+                    worked_minutes = max(0, int((shift_end_dt - record.checkin_at).total_seconds() // 60))
+                    
+                    record.checkout_at = shift_end_dt
+                    record.worked_minutes = worked_minutes
+                    record.auto_checkout = True
+                    record.save(update_fields=["checkout_at", "worked_minutes", "auto_checkout"])
+                    checked_out_count += 1
+        
+        return checked_out_count
