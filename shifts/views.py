@@ -74,9 +74,59 @@ class ShiftViewSet(viewsets.ModelViewSet):
         return qs
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve', 'my_shifts', 'claim', 'swap_candidates']:
+        if self.action in ['list', 'retrieve', 'my_shifts', 'claim', 'cancel_my_assignment', 'swap_candidates']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsAdminRole()]
+
+    @action(detail=False, methods=['post'], url_path='bulk-from-template')
+    def bulk_from_template(self, request):
+        """Tạo nhiều ca từ template theo danh sách ngày"""
+        from datetime import date as date_type
+        template_id = request.data.get('template_id')
+        dates = request.data.get('dates', [])
+        max_workers = request.data.get('max_workers')
+        salary_multiplier = request.data.get('salary_multiplier', '1.00')
+        is_open = request.data.get('is_open', True)
+        note = request.data.get('note', '')
+
+        if not template_id or not dates:
+            return Response({'error': 'Cần cung cấp template_id và danh sách dates.'}, status=400)
+
+        try:
+            template = ShiftTemplate.objects.get(pk=template_id)
+        except ShiftTemplate.DoesNotExist:
+            return Response({'error': 'Template không tồn tại.'}, status=404)
+
+        created = []
+        skipped = []
+        for d in dates:
+            try:
+                shift, was_created = Shift.objects.get_or_create(
+                    template=template,
+                    date=d,
+                    store=template.store,
+                    defaults=dict(
+                        start_time=template.start_time,
+                        end_time=template.end_time,
+                        max_workers=max_workers if max_workers is not None else template.max_workers,
+                        salary_multiplier=salary_multiplier,
+                        is_open=is_open,
+                        note=note or template.name,
+                        created_by=request.user,
+                    )
+                )
+                if was_created:
+                    created.append(str(d))
+                else:
+                    skipped.append(str(d))
+            except Exception as e:
+                skipped.append(str(d))
+
+        return Response({
+            'created': created,
+            'skipped': skipped,
+            'message': f'Đã tạo {len(created)} ca, bỏ qua {len(skipped)} ca đã tồn tại.'
+        }, status=201)
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -190,6 +240,16 @@ class ShiftViewSet(viewsets.ModelViewSet):
             "message": "Đăng ký nguyện vọng thành công. Vui lòng chờ Admin duyệt.",
             "assignment": ShiftAssignmentSerializer(assignment).data
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['delete'], url_path='assignments/me')
+    def cancel_my_assignment(self, request, pk=None):
+        """Nhân viên tự hủy đăng ký ca — chỉ cho phép trước 24 giờ khi ca bắt đầu"""
+        shift = self.get_object()
+        assignment, error = ShiftService.employee_unclaim_shift(shift, request.user)
+        if error:
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR if error.startswith("Lỗi hệ thống") else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": error}, status=status_code)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'], url_path=r'assignments/(?P<assignment_id>\d+)/approve')
     def approve_claim(self, request, pk=None, assignment_id=None):

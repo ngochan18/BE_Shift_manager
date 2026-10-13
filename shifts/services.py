@@ -201,6 +201,42 @@ class ShiftService:
             return None, f"Lỗi hệ thống: {str(e)}", False
 
     @staticmethod
+    def employee_unclaim_shift(shift, user):
+        """Nhân viên tự hủy đăng ký ca — chỉ được hủy trước 24 giờ khi ca bắt đầu"""
+        try:
+            with transaction.atomic():
+                locked_shift = Shift.objects.select_for_update().get(pk=shift.pk)
+
+                shift_start = timezone.make_aware(
+                    datetime.combine(locked_shift.date, locked_shift.start_time)
+                )
+                hours_until = (shift_start - timezone.now()).total_seconds() / 3600
+                if hours_until < 24:
+                    return None, f"Không thể hủy ca trong vòng 24 giờ trước khi ca bắt đầu (còn {hours_until:.1f} giờ)."
+
+                assignment = ShiftAssignment.objects.filter(
+                    shift=locked_shift,
+                    user=user,
+                    status__in=[ShiftAssignment.Status.CONFIRMED, ShiftAssignment.Status.PENDING]
+                ).first()
+
+                if not assignment:
+                    return None, "Bạn không có đăng ký nào cho ca này."
+
+                assignment.status = ShiftAssignment.Status.CANCELLED
+                assignment.save()
+
+                locked_shift.is_open = True
+                locked_shift.save(update_fields=['is_open'])
+
+            # Gửi thông báo sau khi transaction commit
+            NotificationService.notify_shift_self_cancelled(user, locked_shift)
+
+            return assignment, None
+        except Exception as e:
+            return None, f"Lỗi hệ thống: {str(e)}"
+
+    @staticmethod
     def approve_shift_claim(shift, assignment_id, admin_user):
         """
         Duyệt nguyện vọng đăng ký ca tự do.
