@@ -78,6 +78,36 @@ class NotificationService:
             related_shift=shift,
         )
 
+    @staticmethod
+    def notify_shift_self_cancelled(user, shift):
+        """Thông báo nhân viên tự hủy ca + thông báo admin/manager """
+        from django.contrib.auth import get_user_model
+
+        time_range = f"{shift.start_time.strftime('%H:%M')}-{shift.end_time.strftime('%H:%M')}"
+        date_str = shift.date.strftime('%d/%m/%Y')
+
+        # Thông báo cho chính nhân viên
+        NotificationService.send(
+            user=user,
+            notification_type=Notification.Type.SHIFT_UNASSIGNED,
+            title="✅ Hủy đăng ký ca thành công",
+            message=f"Bạn đã tự hủy đăng ký ca {time_range} ngày {date_str}. Ca đã được mở lại để nhân viên khác đăng ký.",
+            related_shift=shift,
+        )
+        User = get_user_model()
+        admins = list(User.objects.filter(role__in=['admin', 'manager'], is_active=True))
+        if admins:
+            NotificationService.send_to_many(
+                users=admins,
+                notification_type=Notification.Type.SHIFT_UNASSIGNED,
+                title="⚠️ Nhân viên hủy đăng ký ca",
+                message=(
+                    f"{getattr(user, 'full_name', user.email)} đã hủy đăng ký ca {time_range} "
+                    f"ngày {date_str}. Ca đã được mở lại."
+                ),
+                related_shift=shift,
+            )
+
     # ── Emergency Shift ──
     @staticmethod
     def notify_emergency_shift(users, shift, is_assigned=True):
