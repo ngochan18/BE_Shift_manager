@@ -10,7 +10,7 @@ from .models import QRToken, CheckInRecord
 from notifications.services import NotificationService
 
 
-QR_VALID_MINUTES = 2           # Mỗi QR chỉ có hiệu lực trong 2 phút
+QR_VALID_SECONDS = 30            # Mỗi QR chỉ có hiệu lực trong 30 giây
 CHECKIN_EARLY_MINUTES = 15     # Cho phép check-in sớm tối đa 15 phút
 CHECKOUT_MAX_HOURS_AFTER_END = 2  # Cho phép check-out muộn tối đa 2 giờ sau khi ca kết thúc
 
@@ -30,7 +30,7 @@ class AttendanceService:
     @staticmethod
     def generate_qr_token(shift: Shift, admin_user):
         now = timezone.now()
-        expires_at = now + timedelta(minutes=QR_VALID_MINUTES)
+        expires_at = now + timedelta(seconds=QR_VALID_SECONDS)
         token_str = str(uuid.uuid4())
 
         try:
