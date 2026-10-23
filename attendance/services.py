@@ -12,7 +12,7 @@ from notifications.services import NotificationService
 
 QR_VALID_SECONDS = 30            # Mỗi QR chỉ có hiệu lực trong 30 giây
 CHECKIN_EARLY_MINUTES = 15     # Cho phép check-in sớm tối đa 15 phút
-CHECKOUT_MAX_HOURS_AFTER_END = 2  # Cho phép check-out muộn tối đa 2 giờ sau khi ca kết thúc
+CHECKOUT_MAX_MINUTES_AFTER_END = 30  # Cho phép check-out muộn tối đa 30 phút sau khi ca kết thúc
 
 
 def _haversine_meters(lat1, lon1, lat2, lon2):
@@ -155,14 +155,19 @@ class AttendanceService:
                 shift_end_dt = timezone.make_aware(
                     datetime.combine(shift.date, shift.end_time)
                 )
-                max_checkout_dt = shift_end_dt + timedelta(hours=CHECKOUT_MAX_HOURS_AFTER_END)
+                if shift.end_time < shift.start_time:
+                    shift_end_dt += timedelta(days=1)
+
+                max_checkout_dt = shift_end_dt + timedelta(minutes=CHECKOUT_MAX_MINUTES_AFTER_END)
                 if now > max_checkout_dt:
                     return None, (
                         f"Đã quá thời gian cho phép check-out "
-                        f"(tối đa {CHECKOUT_MAX_HOURS_AFTER_END} giờ sau khi ca kết thúc)."
+                        f"(tối đa {CHECKOUT_MAX_MINUTES_AFTER_END} phút sau khi ca kết thúc)."
                     )
 
-                worked_minutes = max(0, int((now - record.checkin_at).total_seconds() // 60))
+                # Tính công tối đa theo ca làm, không tính giờ dôi dư lúc check-out muộn
+                effective_checkout_dt = min(now, shift_end_dt)
+                worked_minutes = max(0, int((effective_checkout_dt - record.checkin_at).total_seconds() // 60))
 
                 record.checkout_at = now
                 record.worked_minutes = worked_minutes
@@ -210,6 +215,9 @@ class AttendanceService:
                 shift_end_dt = timezone.make_aware(
                     datetime.combine(shift.date, shift.end_time)
                 )
+                if shift.end_time < shift.start_time:
+                    shift_end_dt += timedelta(days=1)
+
                 if now > shift_end_dt:
                     worked_minutes = max(0, int((shift_end_dt - record.checkin_at).total_seconds() // 60))
                     
