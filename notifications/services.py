@@ -274,3 +274,27 @@ class NotificationService:
             message=f"{swap.requester.full_name} đã hủy yêu cầu {type_label}.",
             related_swap=swap,
         )
+
+    # ── Payroll (Tính lương) ──
+    @staticmethod
+    def notify_payroll_confirmed(user, period, net_amount):
+        """Thông báo khi bảng lương được chốt."""
+        msg = f"Bảng lương tháng {period.month}/{period.year} tại {period.store.name} đã được chốt. Tổng thu nhập thực lĩnh: {int(net_amount):,d} VND. Vui lòng kiểm tra chi tiết trong mục Phiếu Lương."
+        NotificationService.send(
+            user=user,
+            notification_type=Notification.Type.PAYROLL_CONFIRMED,
+            title="💰 Bảng lương đã được chốt",
+            message=msg,
+        )
+
+    @staticmethod
+    def notify_payroll_paid(user, period, net_amount):
+        """Thông báo khi lương đã được thanh toán."""
+        msg = f"Lương tháng {period.month}/{period.year} tại {period.store.name} (Số tiền: {int(net_amount):,d} VND) đã được chuyển khoản thành công. Vui lòng kiểm tra tài khoản ngân hàng."
+        NotificationService.send(
+            user=user,
+            notification_type=Notification.Type.PAYROLL_PAID,
+            title="💸 Đã thanh toán lương",
+            message=msg,
+        )
+

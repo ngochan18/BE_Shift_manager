@@ -38,6 +38,9 @@ class PayrollDetail(models.Model):
     deduction = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     bonus = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    late_count = models.PositiveIntegerField(default=0)
+    early_leave_count = models.PositiveIntegerField(default=0)
+    missing_checkout_count = models.PositiveIntegerField(default=0)
     note = models.TextField(blank=True)
 
     class Meta:
