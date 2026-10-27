@@ -28,7 +28,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     authentication_classes = [JWTAuthentication]
 
     def get_permissions(self):
-        if self.action == 'lookup':
+        if self.action in ['list', 'retrieve', 'lookup']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsAdminRole()]
 

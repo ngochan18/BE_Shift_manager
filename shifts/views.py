@@ -164,10 +164,68 @@ class ShiftViewSet(viewsets.ModelViewSet):
             
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=True, methods=['get'], url_path='available-employees')
+    def available_employees(self, request, pk=None):
+        """Lấy danh sách nhân viên khả dụng và bị trùng ca cho ca này"""
+        shift = self.get_object()
+
+        all_employees = User.objects.filter(is_active=True).exclude(
+            role=User.Role.ADMIN
+        ).order_by('full_name')
+
+        # Lấy danh sách user_id đã được phân công (confirmed/pending) vào ca này
+        already_assigned_ids = set(
+            ShiftAssignment.objects.filter(
+                shift=shift,
+                status__in=[ShiftAssignment.Status.CONFIRMED, ShiftAssignment.Status.PENDING]
+            ).values_list('user_id', flat=True)
+        )
+
+        # Lấy danh sách user_id có ca trùng khung giờ
+        conflicting_user_ids = set(
+            ShiftService.get_overlapping_assignments_for_shift(shift).values_list('user_id', flat=True)
+        )
+
+        available = []
+        conflicting = []
+        for emp in all_employees:
+            if emp.id in already_assigned_ids:
+                continue
+            entry = {
+                'id': emp.id,
+                'full_name': emp.full_name,
+                'phone': emp.phone or '',
+                'role': emp.role,
+            }
+            if emp.id in conflicting_user_ids:
+                # Lấy chi tiết ca trùng để hiển thị
+                overlap_assignments = ShiftService.get_overlapping_assignments(
+                    user=emp, shift=shift, exclude_shift=shift
+                ).select_related('shift')[:3]
+                entry['overlapping_shifts'] = [
+                    {
+                        'id': a.shift.id,
+                        'start_time': str(a.shift.start_time)[:5],
+                        'end_time': str(a.shift.end_time)[:5],
+                    }
+                    for a in overlap_assignments
+                ]
+                conflicting.append(entry)
+            else:
+                available.append(entry)
+
+        return Response({
+            'available': available,
+            'conflicting': conflicting,
+        })
+
     @action(detail=True, methods=['post'], url_path='assignments')
     def assign(self, request, pk=None):
         """Admin phân công nhân viên vào ca"""
         shift = self.get_object()
+        if ShiftService.is_shift_ended(shift):
+            return Response({"detail": "Ca làm việc này đã kết thúc, không thể thêm nhân viên."}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = AssignSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -182,6 +240,7 @@ class ShiftViewSet(viewsets.ModelViewSet):
         if not assignment:
             return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
+        ShiftService.auto_update_shift_status(shift)
         NotificationService.notify_shift_assigned(user, shift, request.user)
 
         return Response({
@@ -194,8 +253,8 @@ class ShiftViewSet(viewsets.ModelViewSet):
         """Admin hủy phân công nhân viên"""
         shift = self.get_object()
 
-        if ShiftService.is_shift_past(shift):
-            return Response({"detail": "Không thể hủy phân công của ca đã diễn ra."}, status=status.HTTP_400_BAD_REQUEST)
+        if ShiftService.is_shift_ended(shift):
+            return Response({"detail": "Không thể hủy phân công của ca đã kết thúc."}, status=status.HTTP_400_BAD_REQUEST)
 
         if not user_id:
             return Response({"detail": "Vui lòng cung cấp user_id."}, status=status.HTTP_400_BAD_REQUEST)

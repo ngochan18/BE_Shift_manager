@@ -9,9 +9,12 @@ class ShiftService:
     @staticmethod
     def is_shift_ended(shift):
         """Kiểm tra ca đã kết thúc chưa so với thời gian hiện tại"""
+        from datetime import timedelta
         shift_end_datetime = timezone.make_aware(
             datetime.combine(shift.date, shift.end_time)
         )
+        if shift.end_time < shift.start_time:
+            shift_end_datetime += timedelta(days=1)
         return shift_end_datetime <= timezone.now()
 
     @staticmethod
@@ -20,8 +23,18 @@ class ShiftService:
         return shift.date < date.today()
 
     @staticmethod
-    def has_overlapping_shift(user, shift, exclude_assignment_ids=None, exclude_shift=None):
-        """Kiểm tra nhân viên có ca trùng khung giờ không"""
+    def get_overlapping_assignments_for_shift(shift):
+        """Lấy danh sách tất cả các phân công (của bất kỳ ai) trùng khung giờ với ca đang xét"""
+        return ShiftAssignment.objects.filter(
+            status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED],
+            shift__date=shift.date,
+            shift__start_time__lt=shift.end_time,
+            shift__end_time__gt=shift.start_time,
+        ).exclude(shift=shift)
+
+    @staticmethod
+    def get_overlapping_assignments(user, shift, exclude_assignment_ids=None, exclude_shift=None):
+        """Lấy danh sách các phân công của một nhân viên trùng khung giờ với ca đang xét"""
         qs = ShiftAssignment.objects.filter(
             user=user,
             status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED],
@@ -29,14 +42,23 @@ class ShiftService:
             shift__start_time__lt=shift.end_time,
             shift__end_time__gt=shift.start_time,
         )
+        if exclude_shift:
+            qs = qs.exclude(shift=exclude_shift)
         if exclude_assignment_ids:
             if not isinstance(exclude_assignment_ids, list):
                 exclude_assignment_ids = [exclude_assignment_ids]
             qs = qs.exclude(id__in=exclude_assignment_ids)
-            
-        if exclude_shift:
-            qs = qs.exclude(shift=exclude_shift)
-            
+        return qs
+
+    @staticmethod
+    def has_overlapping_shift(user, shift, exclude_assignment_ids=None, exclude_shift=None):
+        """Kiểm tra nhân viên có ca trùng khung giờ không (loại trừ chính ca đang xét)"""
+        qs = ShiftService.get_overlapping_assignments(
+            user=user,
+            shift=shift,
+            exclude_assignment_ids=exclude_assignment_ids,
+            exclude_shift=exclude_shift if exclude_shift else shift
+        )
         return qs.exists()
 
     @staticmethod
@@ -67,14 +89,15 @@ class ShiftService:
     @staticmethod
     def claim_open_shift(user, shift, from_user=None, assigned_by=None):
         """
-        Xử lý đăng ký nhận một ca trống 
+        Xử lý đăng ký nhận một ca trống hoặc admin phân công nhân viên
         """
         try:
             with transaction.atomic():
                 locked_user = get_user_model().objects.select_for_update().get(id=user.id)
                 
                 if ShiftService.has_overlapping_shift(locked_user, shift, exclude_shift=shift if from_user else None):
-                    return None, "Bạn đã có ca khác trùng khung giờ này."
+                    name = locked_user.full_name if assigned_by else "Bạn"
+                    return None, f"{name} đã có ca làm việc khác trùng khung giờ này."
 
                 if from_user:
                     target_assignment = ShiftAssignment.objects.filter(
@@ -100,11 +123,19 @@ class ShiftService:
                 
                 if not created:
                     if assignment.status == ShiftAssignment.Status.CANCELLED:
-                        assignment.status = ShiftAssignment.Status.PENDING
+                        assignment.status = ShiftAssignment.Status.CONFIRMED if assigned_by else ShiftAssignment.Status.PENDING
                         assignment.assigned_by = assigned_by
                         assignment.save()
+                    elif assignment.status == ShiftAssignment.Status.PENDING and assigned_by:
+                        assignment.status = ShiftAssignment.Status.CONFIRMED
+                        assignment.assigned_by = assigned_by
+                        assignment.save()
+                    elif assignment.status == ShiftAssignment.Status.CONFIRMED:
+                        name = locked_user.full_name if assigned_by else "Bạn"
+                        return None, f"{name} đã được phân công chính thức vào ca này rồi."
                     else:
-                        return None, "Bạn đã đăng ký hoặc đang chờ duyệt ca này rồi."
+                        name = locked_user.full_name if assigned_by else "Bạn"
+                        return None, f"{name} đã đăng ký hoặc đang chờ duyệt ca này rồi."
 
                 return assignment, None
 
@@ -148,12 +179,7 @@ class ShiftService:
                 if users_to_assign:
                     NotificationService.notify_emergency_shift(users_to_assign, shift, is_assigned=True)
                 else:
-                    busy_user_ids = ShiftAssignment.objects.filter(
-                        status__in=[ShiftAssignment.Status.PENDING, ShiftAssignment.Status.CONFIRMED],
-                        shift__date=shift.date,
-                        shift__start_time__lt=shift.end_time,
-                        shift__end_time__gt=shift.start_time,
-                    ).values_list('user_id', flat=True)
+                    busy_user_ids = ShiftService.get_overlapping_assignments_for_shift(shift).values_list('user_id', flat=True)
 
                     # Lấy ra danh sách các nhân viên đang rảnh
                     available_employees = User.objects.filter(
@@ -245,6 +271,9 @@ class ShiftService:
             with transaction.atomic():
                 locked_shift = Shift.objects.select_for_update().get(pk=shift.pk)
                 
+                if ShiftService.is_shift_ended(locked_shift):
+                    return None, "Ca làm việc này đã kết thúc, không thể duyệt."
+
                 try:
                     assignment = ShiftAssignment.objects.get(id=assignment_id, shift=locked_shift, status=ShiftAssignment.Status.PENDING)
                 except ShiftAssignment.DoesNotExist:
@@ -296,6 +325,10 @@ class ShiftService:
             with transaction.atomic():
                 locked_swap = ShiftSwapRequest.objects.select_for_update().get(pk=swap.pk)
                 
+                if (locked_swap.target_shift and ShiftService.is_shift_ended(locked_swap.target_shift)) or \
+                   (locked_swap.offered_shift and ShiftService.is_shift_ended(locked_swap.offered_shift)):
+                    return None, "Ca làm việc này đã kết thúc, không thể thực hiện."
+
                 if locked_swap.status != ShiftSwapRequest.Status.PARTNER_ACCEPTED:
                     return None, "Yêu cầu này không ở trạng thái chờ Admin duyệt."
 

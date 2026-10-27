@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.db import transaction, IntegrityError
 
 from shifts.models import Shift, ShiftAssignment
+from shifts.services import ShiftService
 from .models import QRToken, CheckInRecord
 from notifications.services import NotificationService
 
@@ -29,6 +30,9 @@ class AttendanceService:
 
     @staticmethod
     def generate_qr_token(shift: Shift, admin_user):
+        if ShiftService.is_shift_ended(shift):
+            return None, "Ca làm việc này đã kết thúc, không thể tạo mã QR check-in."
+
         now = timezone.now()
         expires_at = now + timedelta(seconds=QR_VALID_SECONDS)
         token_str = str(uuid.uuid4())
