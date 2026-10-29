@@ -9,7 +9,8 @@ from shifts.models import Shift, ShiftAssignment
 from shifts.services import ShiftService
 from .models import QRToken, CheckInRecord
 from notifications.services import NotificationService
-
+from zoneinfo import ZoneInfo
+from datetime import date
 
 QR_VALID_SECONDS = 30            # Mỗi QR chỉ có hiệu lực trong 30 giây
 CHECKIN_EARLY_MINUTES = 15     # Cho phép check-in sớm tối đa 15 phút
@@ -27,6 +28,69 @@ def _haversine_meters(lat1, lon1, lat2, lon2):
 
 
 class AttendanceService:
+
+    @staticmethod
+    def get_user_monthly_metrics(user):
+        if not user:
+            return None
+        _VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+        now = timezone.now().astimezone(_VN_TZ)
+        # Tính khoảng thời gian của tháng trước
+        first_day_of_this_month = now.date().replace(day=1)
+        end_of_month = first_day_of_this_month - timedelta(days=1)
+        start_of_month = end_of_month.replace(day=1)
+
+        
+        late_count = CheckInRecord.objects.filter(
+            user=user,
+            shift__date__range=[start_of_month, end_of_month],
+            late_minutes__gt=5
+        ).count()
+
+        records = CheckInRecord.objects.filter(
+            user=user,
+            shift__date__range=[start_of_month, end_of_month],
+            checkout_at__isnull=False
+        ).select_related('shift')
+        
+        early_checkout_count = 0
+        for r in records:
+            shift = r.shift
+            shift_end_dt = datetime.combine(shift.date, shift.end_time)
+            if shift.end_time < shift.start_time:
+                shift_end_dt += timedelta(days=1)
+            shift_end_dt = timezone.make_aware(shift_end_dt, timezone=_VN_TZ)
+            if r.checkout_at < shift_end_dt:
+                if (shift_end_dt - r.checkout_at).total_seconds() > 300:
+                    early_checkout_count += 1
+
+        confirmed_assignments = ShiftAssignment.objects.filter(
+            user=user,
+            status=ShiftAssignment.Status.CONFIRMED,
+            shift__date__range=[start_of_month, end_of_month]
+        ).select_related('shift')
+
+        absent_count = 0
+        shift_ids = [a.shift.id for a in confirmed_assignments]
+        checkins = {c.shift_id: c for c in CheckInRecord.objects.filter(user=user, shift_id__in=shift_ids)}
+
+        for a in confirmed_assignments:
+            shift = a.shift
+            shift_end_dt = datetime.combine(shift.date, shift.end_time)
+            if shift.end_time < shift.start_time:
+                shift_end_dt += timedelta(days=1)
+            shift_end_dt = timezone.make_aware(shift_end_dt, timezone=_VN_TZ)
+
+            if shift_end_dt <= now:
+                record = checkins.get(shift.id)
+                if not record or not record.checkin_at:
+                    absent_count += 1
+
+        return {
+            "late_count": late_count,
+            "early_checkout_count": early_checkout_count,
+            "absent_count": absent_count
+        }
 
     @staticmethod
     def generate_qr_token(shift: Shift, admin_user):
@@ -232,3 +296,218 @@ class AttendanceService:
                     checked_out_count += 1
         
         return checked_out_count
+
+    @staticmethod
+    def get_admin_stats(start_date=None, end_date=None, store_id=None, user_id=None):
+        """
+        Tổng hợp thống kê công, đi muộn, về sớm, vắng mặt của toàn bộ nhân viên
+        phục vụ giao diện Thống kê báo cáo của Admin.
+        """
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        _VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+        now = timezone.now().astimezone(_VN_TZ)
+
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            except ValueError:
+                start_dt = now.date().replace(day=1)
+        else:
+            start_dt = now.date().replace(day=1)
+
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+            except ValueError:
+                if now.month == 12:
+                    end_dt = date(now.year + 1, 1, 1) - timedelta(days=1)
+                else:
+                    end_dt = date(now.year, now.month + 1, 1) - timedelta(days=1)
+        else:
+            if now.month == 12:
+                end_dt = date(now.year + 1, 1, 1) - timedelta(days=1)
+            else:
+                end_dt = date(now.year, now.month + 1, 1) - timedelta(days=1)
+
+        records_qs = CheckInRecord.objects.filter(
+            shift__date__range=[start_dt, end_dt]
+        ).select_related("shift", "user")
+
+        if store_id:
+            records_qs = records_qs.filter(shift__store_id=store_id)
+        if user_id:
+            records_qs = records_qs.filter(user_id=user_id)
+
+        records = list(records_qs)
+
+        assignments_qs = ShiftAssignment.objects.filter(
+            status=ShiftAssignment.Status.CONFIRMED,
+            shift__date__range=[start_dt, end_dt]
+        ).select_related("shift")
+
+        if store_id:
+            assignments_qs = assignments_qs.filter(shift__store_id=store_id)
+        if user_id:
+            assignments_qs = assignments_qs.filter(user_id=user_id)
+
+        assignments = list(assignments_qs)
+
+        record_map = {(r.shift_id, r.user_id): r for r in records}
+
+        total_shifts = len(records)
+        total_worked_minutes = sum(r.worked_minutes for r in records if r.worked_minutes)
+        total_worked_hours = round(total_worked_minutes / 60.0, 2)
+
+        late_count = sum(1 for r in records if r.late_minutes > 5)
+
+        early_checkout_count = 0
+        for r in records:
+            if not r.checkout_at:
+                continue
+            shift = r.shift
+            shift_end_dt = datetime.combine(shift.date, shift.end_time)
+            if shift.end_time < shift.start_time:
+                shift_end_dt += timedelta(days=1)
+            shift_end_dt = timezone.make_aware(shift_end_dt, timezone=_VN_TZ)
+            if r.checkout_at < shift_end_dt:
+                if (shift_end_dt - r.checkout_at).total_seconds() > 300:
+                    early_checkout_count += 1
+
+        # Vắng mặt
+        absent_count = 0
+        total_confirmed_ended = 0
+        
+        # Theo dõi vắng mặt theo ngày và theo nhân viên
+        absent_assignments = []
+        for a in assignments:
+            shift = a.shift
+            shift_end_dt = datetime.combine(shift.date, shift.end_time)
+            if shift.end_time < shift.start_time:
+                shift_end_dt += timedelta(days=1)
+            shift_end_dt = timezone.make_aware(shift_end_dt, timezone=_VN_TZ)
+
+            if shift_end_dt <= now:
+                total_confirmed_ended += 1
+                rec = record_map.get((shift.id, a.user_id))
+                if not rec or not rec.checkin_at:
+                    absent_count += 1
+                    absent_assignments.append(a)
+
+        # Tính toán tỷ lệ
+        late_rate = round((late_count / total_shifts * 100.0) if total_shifts > 0 else 0.0, 1)
+        early_checkout_rate = round((early_checkout_count / total_shifts * 100.0) if total_shifts > 0 else 0.0, 1)
+        absent_rate = round((absent_count / total_confirmed_ended * 100.0) if total_confirmed_ended > 0 else 0.0, 1)
+
+        # Tổng hợp
+        summary = {
+            "total_shifts": total_shifts,
+            "total_worked_hours": total_worked_hours,
+            "late_count": late_count,
+            "early_checkout_count": early_checkout_count,
+            "absent_count": absent_count,
+            "late_rate": late_rate,
+            "early_checkout_rate": early_checkout_rate,
+            "absent_rate": absent_rate
+        }
+
+        # 3. Daily Stats (Grouped by date)
+        daily_data = {}
+        curr = start_dt
+        while curr <= end_dt:
+            daily_data[curr] = {
+                "date": curr.strftime("%Y-%m-%d"),
+                "worked_hours": 0.0,
+                "late_count": 0,
+                "early_checkout_count": 0,
+                "absent_count": 0
+            }
+            curr += timedelta(days=1)
+
+        # Thêm bản ghi vào thống kê ngày
+        for r in records:
+            d = r.shift.date
+            if d in daily_data:
+                daily_data[d]["worked_hours"] += (r.worked_minutes or 0) / 60.0
+                if r.late_minutes > 5:
+                    daily_data[d]["late_count"] += 1
+                
+                if r.checkout_at:
+                    shift = r.shift
+                    shift_end_dt = datetime.combine(shift.date, shift.end_time)
+                    if shift.end_time < shift.start_time:
+                        shift_end_dt += timedelta(days=1)
+                    shift_end_dt = timezone.make_aware(shift_end_dt, timezone=_VN_TZ)
+                    if r.checkout_at < shift_end_dt:
+                        if (shift_end_dt - r.checkout_at).total_seconds() > 300:
+                            daily_data[d]["early_checkout_count"] += 1
+
+        # Thêm vắng mặt vào thống kê ngày
+        for a in absent_assignments:
+            d = a.shift.date
+            if d in daily_data:
+                daily_data[d]["absent_count"] += 1
+
+        # Làm tròn giờ làm việc theo ngày
+        for d in daily_data:
+            daily_data[d]["worked_hours"] = round(daily_data[d]["worked_hours"], 2)
+
+        sorted_daily = [daily_data[k] for k in sorted(daily_data.keys())]
+
+        # 4. Thống kê theo nhân viên
+        users_qs = User.objects.filter(role="employee")
+        if user_id:
+            users_qs = users_qs.filter(id=user_id)
+        
+        users_list = list(users_qs)
+        employee_data = {}
+        for u in users_list:
+            employee_data[u.id] = {
+                "id": u.id,
+                "full_name": u.full_name,
+                "phone": u.phone,
+                "avatar_url": u.avatar_url,
+                "total_shifts": 0,
+                "total_worked_hours": 0.0,
+                "late_count": 0,
+                "early_checkout_count": 0,
+                "absent_count": 0
+            }
+
+        # Thêm bản ghi vào thống kê nhân viên
+        for r in records:
+            uid = r.user_id
+            if uid in employee_data:
+                employee_data[uid]["total_shifts"] += 1
+                employee_data[uid]["total_worked_hours"] += (r.worked_minutes or 0) / 60.0
+                if r.late_minutes > 5:
+                    employee_data[uid]["late_count"] += 1
+                
+                if r.checkout_at:
+                    shift = r.shift
+                    shift_end_dt = datetime.combine(shift.date, shift.end_time)
+                    if shift.end_time < shift.start_time:
+                        shift_end_dt += timedelta(days=1)
+                    shift_end_dt = timezone.make_aware(shift_end_dt, timezone=_VN_TZ)
+                    if r.checkout_at < shift_end_dt:
+                        if (shift_end_dt - r.checkout_at).total_seconds() > 300:
+                            employee_data[uid]["early_checkout_count"] += 1
+
+        # Thêm vắng mặt vào thống kê nhân viên
+        for a in absent_assignments:
+            uid = a.user_id
+            if uid in employee_data:
+                employee_data[uid]["absent_count"] += 1
+
+        # Làm tròn và dọn dẹp dữ liệu nhân viên
+        for uid in employee_data:
+            employee_data[uid]["total_worked_hours"] = round(employee_data[uid]["total_worked_hours"], 2)
+
+        sorted_employees = sorted(employee_data.values(), key=lambda x: x["total_worked_hours"], reverse=True)
+
+        return {
+            "summary": summary,
+            "daily_stats": sorted_daily,
+            "employee_stats": sorted_employees
+        }
+

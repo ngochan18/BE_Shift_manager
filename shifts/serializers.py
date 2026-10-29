@@ -14,11 +14,19 @@ class ShiftTemplateSerializer(serializers.ModelSerializer):
 class ShiftAssignmentSerializer(serializers.ModelSerializer):
     user_name = serializers.CharField(source='user.full_name', read_only=True)
     user_phone = serializers.CharField(source='user.phone', read_only=True)
+    user_metrics = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = ShiftAssignment
-        fields = ['id', 'user', 'user_name', 'user_phone', 'assigned_by', 'assigned_at', 'status']
+        fields = ['id', 'user', 'user_name', 'user_phone', 'assigned_by', 'assigned_at', 'status', 'user_metrics']
         read_only_fields = ['id', 'assigned_by', 'assigned_at']
+
+    def get_user_metrics(self, obj):
+        user = obj.user
+        if not user:
+            return None
+        from attendance.services import AttendanceService
+        return AttendanceService.get_user_monthly_metrics(user)
 
 
 class ShiftSerializer(serializers.ModelSerializer):
