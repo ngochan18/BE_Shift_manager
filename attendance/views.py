@@ -163,3 +163,34 @@ class AttendanceRecordViewSet(viewsets.GenericViewSet):
             "detail": f"Đã chốt thành công {count} ca làm việc chưa check-out.",
             "count": count
         }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='admin-stats')
+    def admin_stats(self, request):
+        """Thống kê báo cáo chấm công của nhân viên dành cho admin/manager"""
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Không có quyền truy cập."}, status=status.HTTP_403_FORBIDDEN)
+
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        store_id = request.query_params.get("store_id")
+        user_id = request.query_params.get("user_id")
+
+        if store_id:
+            try:
+                store_id = int(store_id)
+            except ValueError:
+                store_id = None
+        if user_id:
+            try:
+                user_id = int(user_id)
+            except ValueError:
+                user_id = None
+
+        stats = AttendanceService.get_admin_stats(
+            start_date=start_date,
+            end_date=end_date,
+            store_id=store_id,
+            user_id=user_id
+        )
+        return Response(stats, status=status.HTTP_200_OK)
+
