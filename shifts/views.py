@@ -375,11 +375,18 @@ class ShiftViewSet(viewsets.ModelViewSet):
         if employee_id:
             qs = qs.filter(assignments__user_id=employee_id, assignments__status=ShiftAssignment.Status.CONFIRMED)
 
+        # Exclude employees currently requesting to send or swap shifts
+        active_requester_ids = ShiftSwapRequest.objects.filter(
+            status__in=[ShiftSwapRequest.Status.PENDING, ShiftSwapRequest.Status.PARTNER_ACCEPTED]
+        ).values_list('requester_id', flat=True)
+
         data = []
         for shift in qs:
             confirmed = [
                 a for a in shift.assignments.all()
-                if a.status == ShiftAssignment.Status.CONFIRMED and str(a.user_id) != str(request.user.id)
+                if a.status == ShiftAssignment.Status.CONFIRMED 
+                and str(a.user_id) != str(request.user.id)
+                and a.user_id not in active_requester_ids
             ]
             if employee_id:
                 confirmed = [a for a in confirmed if str(a.user_id) == str(employee_id)]
@@ -439,12 +446,69 @@ class ShiftSwapRequestViewSet(viewsets.ModelViewSet):
                 if swap.status != ShiftSwapRequest.Status.PENDING:
                     return Response({"detail": "Yêu cầu này không ở trạng thái chờ bạn xác nhận."}, status=status.HTTP_400_BAD_REQUEST)
 
+                from .services import ShiftService
+                if swap.swap_type == ShiftSwapRequest.SwapType.TRANSFER:
+                    #  Kiểm tra xem người nhượng đã có yêu cầu nhượng ca này được đồng ý bởi người khác chưa
+                    conflict_give = ShiftSwapRequest.objects.filter(
+                        requester=swap.requester,
+                        offered_shift_id=swap.offered_shift_id,
+                        status=ShiftSwapRequest.Status.PARTNER_ACCEPTED
+                    ).exclude(id=swap.id).exists()
+                    if conflict_give:
+                        return Response({"detail": "Người nhượng đã có yêu cầu nhượng ca này được người khác chấp nhận."}, status=status.HTTP_400_BAD_REQUEST)
+
+                    #  Kiểm tra xem bạn (partner) đã đồng ý nhận ca này từ yêu cầu khác chưa
+                    conflict_receive = ShiftSwapRequest.objects.filter(
+                        Q(partner=swap.partner, offered_shift_id=swap.offered_shift_id) |
+                        Q(requester=swap.partner, target_shift_id=swap.offered_shift_id),
+                        status=ShiftSwapRequest.Status.PARTNER_ACCEPTED
+                    ).exclude(id=swap.id).exists()
+                    if conflict_receive:
+                        return Response({"detail": "Bạn đã đồng ý nhận ca làm việc này từ một yêu cầu khác."}, status=status.HTTP_400_BAD_REQUEST)
+
+                elif swap.swap_type == ShiftSwapRequest.SwapType.EXCHANGE:
+                    #  Kiểm tra người yêu cầu (requester) đã có yêu cầu cho đi ca offered_shift được đồng ý bởi người khác chưa
+                    conflict_req_give = ShiftSwapRequest.objects.filter(
+                        requester=swap.requester,
+                        offered_shift_id=swap.offered_shift_id,
+                        status=ShiftSwapRequest.Status.PARTNER_ACCEPTED
+                    ).exclude(id=swap.id).exists()
+                    if conflict_req_give:
+                        return Response({"detail": "Người yêu cầu đã có yêu cầu đổi ca này được người khác chấp nhận."}, status=status.HTTP_400_BAD_REQUEST)
+
+                    # 2. Kiểm tra bạn (partner) đã có yêu cầu cho đi ca target_shift được đồng ý bởi người khác chưa
+                    conflict_partner_give = ShiftSwapRequest.objects.filter(
+                        Q(requester=swap.partner, offered_shift_id=swap.target_shift_id) |
+                        Q(partner=swap.partner, target_shift_id=swap.target_shift_id),
+                        status=ShiftSwapRequest.Status.PARTNER_ACCEPTED
+                    ).exclude(id=swap.id).exists()
+                    if conflict_partner_give:
+                        return Response({"detail": "Bạn đã đồng ý đổi ca làm việc này của bạn trong một yêu cầu khác."}, status=status.HTTP_400_BAD_REQUEST)
+
+                    # 3. Kiểm tra bạn (partner) đã đồng ý nhận ca offered_shift từ yêu cầu khác chưa
+                    conflict_partner_receive = ShiftSwapRequest.objects.filter(
+                        Q(partner=swap.partner, offered_shift_id=swap.offered_shift_id) |
+                        Q(requester=swap.partner, target_shift_id=swap.offered_shift_id),
+                        status=ShiftSwapRequest.Status.PARTNER_ACCEPTED
+                    ).exclude(id=swap.id).exists()
+                    if conflict_partner_receive:
+                        return Response({"detail": "Bạn đã đồng ý nhận ca làm việc này từ một yêu cầu khác."}, status=status.HTTP_400_BAD_REQUEST)
+
+                    # 4. Kiểm tra người yêu cầu (requester) đã đồng ý nhận ca target_shift từ yêu cầu khác chưa
+                    conflict_req_receive = ShiftSwapRequest.objects.filter(
+                        Q(partner=swap.requester, offered_shift_id=swap.target_shift_id) |
+                        Q(requester=swap.requester, target_shift_id=swap.target_shift_id),
+                        status=ShiftSwapRequest.Status.PARTNER_ACCEPTED
+                    ).exclude(id=swap.id).exists()
+                    if conflict_req_receive:
+                        return Response({"detail": "Người yêu cầu đã đồng ý nhận ca làm việc này từ một yêu cầu khác."}, status=status.HTTP_400_BAD_REQUEST)
+
                 swap.status = ShiftSwapRequest.Status.PARTNER_ACCEPTED
                 swap.save()
                 NotificationService.notify_swap_partner_accepted(swap)
                 return Response({"message": "Bạn đã xác nhận đồng ý yêu cầu đổi/nhượng ca. Vui lòng chờ Admin duyệt."}, status=status.HTTP_200_OK)
         except ShiftSwapRequest.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+             return Response(status=status.HTTP_404_NOT_FOUND)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='partner-reject')
     def partner_reject(self, request, pk=None):

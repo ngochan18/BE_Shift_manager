@@ -109,5 +109,23 @@ class ShiftSwapRequestSerializer(serializers.ModelSerializer):
             ).first()
             if not assignment:
                  raise serializers.ValidationError("Bạn không được phân công hoặc chưa được xác nhận vào ca đề xuất.")
+            
+            # Kiểm tra xem requester đã có yêu cầu cho ca đề xuất này đang chờ xử lý hay chưa
+            existing_request = ShiftSwapRequest.objects.filter(
+                requester=requester,
+                offered_shift=offered_shift,
+                status__in=[ShiftSwapRequest.Status.PENDING, ShiftSwapRequest.Status.PARTNER_ACCEPTED]
+            ).exists()
+            if existing_request:
+                raise serializers.ValidationError("Bạn đã có yêu cầu đổi/nhượng ca cho ca làm việc này đang chờ xử lý.")
+
+        if partner:
+            # Kiểm tra xem partner có yêu cầu đổi/nhượng ca nào đang chờ xử lý hay không
+            partner_has_request = ShiftSwapRequest.objects.filter(
+                requester=partner,
+                status__in=[ShiftSwapRequest.Status.PENDING, ShiftSwapRequest.Status.PARTNER_ACCEPTED]
+            ).exists()
+            if partner_has_request:
+                raise serializers.ValidationError("Nhân viên đối tác hiện đang có yêu cầu gửi hoặc đổi ca khác đang chờ xử lý.")
 
         return data

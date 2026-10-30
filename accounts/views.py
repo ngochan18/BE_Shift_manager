@@ -27,6 +27,17 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsAdminRole]
     authentication_classes = [JWTAuthentication]
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        exclude_swapping = self.request.query_params.get('exclude_swapping')
+        if exclude_swapping and exclude_swapping.lower() == 'true':
+            from shifts.models import ShiftSwapRequest
+            active_requester_ids = ShiftSwapRequest.objects.filter(
+                status__in=[ShiftSwapRequest.Status.PENDING, ShiftSwapRequest.Status.PARTNER_ACCEPTED]
+            ).values_list('requester_id', flat=True)
+            qs = qs.exclude(id__in=active_requester_ids)
+        return qs
+
     def get_permissions(self):
         if self.action in ['list', 'retrieve', 'lookup']:
             return [IsAuthenticated()]
@@ -54,6 +65,15 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             employee = User.objects.get(phone=phone, is_active=True)
             if employee == request.user:
                 return Response({'error': 'Không thể tìm chính mình.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            from shifts.models import ShiftSwapRequest
+            has_active_request = ShiftSwapRequest.objects.filter(
+                requester=employee,
+                status__in=[ShiftSwapRequest.Status.PENDING, ShiftSwapRequest.Status.PARTNER_ACCEPTED]
+            ).exists()
+            if has_active_request:
+                return Response({'error': 'Nhân viên này đang có yêu cầu đổi/nhượng ca khác.'}, status=status.HTTP_400_BAD_REQUEST)
+
             return Response({'id': employee.id, 'full_name': employee.full_name, 'phone': employee.phone})
         except User.DoesNotExist:
             return Response({'error': 'Không tìm thấy nhân viên với số điện thoại này.'}, status=status.HTTP_404_NOT_FOUND)
