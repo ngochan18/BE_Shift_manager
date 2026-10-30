@@ -121,7 +121,14 @@ def _to_vn(dt):
     return dt.astimezone(_VN_TZ)
 
 def _fmt_date(d):
-    return d.strftime("%d/%m/%Y") if d else ""
+    if not d:
+        return ""
+    days = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
+    try:
+        weekday_str = days[d.weekday()]
+        return f"{d.strftime('%d/%m/%Y')} ({weekday_str})"
+    except AttributeError:
+        return d.strftime("%d/%m/%Y")
 
 def _fmt_time(t):
     return t.strftime("%H:%M") if t else ""
@@ -463,8 +470,29 @@ def run_chat(user, message, history):
     ]
     base_contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
 
+    today_vn = datetime.now(tz=_VN_TZ)
+    current_date = today_vn.date()
+    current_date_str = today_vn.strftime("%d/%m/%Y")
+    current_day_name = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"][today_vn.weekday()]
+
+    monday_this_week = current_date - timedelta(days=current_date.weekday())
+    sunday_this_week = monday_this_week + timedelta(days=6)
+    monday_next_week = monday_this_week + timedelta(days=7)
+    sunday_next_week = monday_next_week + timedelta(days=6)
+
+    dynamic_system_prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"=== THÔNG TIN HỆ THỐNG HIỆN TẠI ===\n"
+        f"- Ngày hôm nay: {current_day_name}, {current_date_str}\n"
+        f"- Giờ hiện tại: {today_vn.strftime('%H:%M')}\n"
+        f"- Tuần này bắt đầu từ Thứ Hai {monday_this_week.strftime('%d/%m/%Y')} đến Chủ Nhật {sunday_this_week.strftime('%d/%m/%Y')}.\n"
+        f"- Tuần sau bắt đầu từ Thứ Hai {monday_next_week.strftime('%d/%m/%Y')} đến Chủ Nhật {sunday_next_week.strftime('%d/%m/%Y')}.\n"
+        f"Sử dụng thông tin thời gian thực này để trả lời chính xác các câu hỏi liên quan đến thời gian, "
+        f"và khi gọi tool getMySchedule/getOpenShifts, hãy truyền tham số from_date và to_date phù hợp nếu cần thiết."
+    )
+
     config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
+        system_instruction=dynamic_system_prompt,
         tools=TOOLS,
     )
 

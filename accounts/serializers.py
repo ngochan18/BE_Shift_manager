@@ -69,7 +69,8 @@ class UserSerializer(serializers.ModelSerializer):
 class EmployeeUpdateProfileNestedSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeProfile
-        fields = ['bank_account', 'bank_name', 'address', 'emergency_contact']
+        fields = ['hourly_rate', 'bank_account', 'bank_name', 'id_card_number', 'address', 'emergency_contact', 'start_date', 'note']
+        read_only_fields = ['hourly_rate', 'bank_account', 'bank_name', 'id_card_number', 'start_date', 'note']
 
 class EmployeeProfileUpdateSerializer(serializers.ModelSerializer):
     profile = EmployeeUpdateProfileNestedSerializer(required=False)
