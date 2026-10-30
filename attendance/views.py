@@ -164,6 +164,24 @@ class AttendanceRecordViewSet(viewsets.GenericViewSet):
             "count": count
         }, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['get'], url_path='today')
+    def today_records(self, request):
+        """Danh sách check-in, check-out của toàn bộ nhân viên trong ngày hôm nay (Admin/Manager)"""
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Không có quyền truy cập."}, status=status.HTTP_403_FORBIDDEN)
+
+        from zoneinfo import ZoneInfo
+        from django.utils import timezone
+        _VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+        now = timezone.now().astimezone(_VN_TZ)
+        today = now.date()
+
+        records = CheckInRecord.objects.filter(
+            shift__date=today
+        ).select_related('shift', 'user')
+
+        return Response(self.get_serializer(records, many=True).data)
+
     @action(detail=False, methods=['get'], url_path='admin-stats')
     def admin_stats(self, request):
         """Thống kê báo cáo chấm công của nhân viên dành cho admin/manager"""
