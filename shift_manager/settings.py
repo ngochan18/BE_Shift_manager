@@ -93,7 +93,7 @@ WSGI_APPLICATION = 'shift_manager.wsgi.application'
 DATABASES = {
     "default": {
         "ENGINE": os.getenv("DB_ENGINE", "django.db.backends.postgresql"),
-        "NAME": os.getenv("DB_NAME", "BaoHiem"),
+        "NAME": os.getenv("DB_NAME", "shift_manager_db"),
         "USER": os.getenv("DB_USER", "postgres"),
         "PASSWORD": os.getenv("DB_PASSWORD", "27112004"),
         "HOST": os.getenv("DB_HOST", "localhost"),

@@ -35,11 +35,10 @@ class AttendanceService:
             return None
         _VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
         now = timezone.now().astimezone(_VN_TZ)
-        start_of_month = now.date().replace(day=1)
-        if now.month == 12:
-            end_of_month = date(now.year + 1, 1, 1) - timedelta(days=1)
-        else:
-            end_of_month = date(now.year, now.month + 1, 1) - timedelta(days=1)
+        # Tính khoảng thời gian của tháng trước (Last Month)
+        first_day_of_this_month = now.date().replace(day=1)
+        end_of_month = first_day_of_this_month - timedelta(days=1)
+        start_of_month = end_of_month.replace(day=1)
 
         
         late_count = CheckInRecord.objects.filter(
