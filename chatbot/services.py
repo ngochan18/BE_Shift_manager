@@ -450,12 +450,14 @@ def execute_tool(name, args, user):
         return tool()
     return {"error": f"Tool '{name}' không được hỗ trợ."}
 
-MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-]
+MODELS_ENV = os.getenv("GEMINI_MODELS", "")
+if MODELS_ENV:
+    MODELS = [m.strip() for m in MODELS_ENV.split(",") if m.strip()]
+else:
+    MODELS = [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ]
 
 
 def run_chat(user, message, history):
@@ -466,7 +468,7 @@ def run_chat(user, message, history):
             role="user" if msg.role == "user" else "model",
             parts=[types.Part(text=msg.content)],
         )
-        for msg in history
+        for msg in history[-20:]
     ]
     base_contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
 
