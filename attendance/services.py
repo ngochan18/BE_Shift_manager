@@ -35,12 +35,12 @@ class AttendanceService:
             return None
         _VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
         now = timezone.now().astimezone(_VN_TZ)
-        # Tính khoảng thời gian của tháng trước (Last Month)
+        # Tính khoảng thời gian của tháng trước 
         first_day_of_this_month = now.date().replace(day=1)
         end_of_month = first_day_of_this_month - timedelta(days=1)
         start_of_month = end_of_month.replace(day=1)
 
-        
+        # đi muộn
         late_count = CheckInRecord.objects.filter(
             user=user,
             shift__date__range=[start_of_month, end_of_month],
@@ -52,7 +52,7 @@ class AttendanceService:
             shift__date__range=[start_of_month, end_of_month],
             checkout_at__isnull=False
         ).select_related('shift')
-        
+        # về sớm
         early_checkout_count = 0
         for r in records:
             shift = r.shift
@@ -118,6 +118,12 @@ class AttendanceService:
     @staticmethod
     def checkin(user, token_str: str, latitude, longitude):
         try:
+            # Tự động chốt các ca cũ nếu có
+            try:
+                AttendanceService.auto_checkout(user)
+            except Exception:
+                pass
+
             with transaction.atomic():
                 try:
                     qr = QRToken.objects.select_related("shift__store").get(token=token_str)
@@ -163,6 +169,7 @@ class AttendanceService:
 
                 #  Tính số phút đi trễ
                 late_minutes = max(0, int((now - shift_start_dt).total_seconds() // 60))
+                effective_checkin_at = shift_start_dt if now <= shift_start_dt else now
 
                 #  GPS
                 distance = _haversine_meters(
@@ -182,6 +189,7 @@ class AttendanceService:
                     user=user,
                     defaults={
                         "checkin_at": now,
+                        "effective_checkin_at": effective_checkin_at,
                         "checkin_lat": latitude,
                         "checkin_lng": longitude,
                         "checkin_distance_meters": distance,
@@ -235,7 +243,8 @@ class AttendanceService:
 
                 # Tính công tối đa theo ca làm, không tính giờ dôi dư lúc check-out muộn
                 effective_checkout_dt = min(now, shift_end_dt)
-                worked_minutes = max(0, int((effective_checkout_dt - record.checkin_at).total_seconds() // 60))
+                start_dt = record.effective_checkin_at or record.checkin_at
+                worked_minutes = max(0, int((effective_checkout_dt - start_dt).total_seconds() // 60))
 
                 record.checkout_at = now
                 record.worked_minutes = worked_minutes
@@ -256,14 +265,101 @@ class AttendanceService:
         return CheckInRecord.objects.filter(shift=shift).select_related("user", "shift__store")
 
     @staticmethod
+    def auto_checkout(user):
+        """
+        Tự động check-out các ca làm việc đã kết thúc của một nhân viên cụ thể nếu họ quên.
+        """
+        now = timezone.now()
+        pending_records = CheckInRecord.objects.filter(
+            user=user,
+            checkin_at__isnull=False,
+            checkout_at__isnull=True
+        ).select_related("shift")
+
+        checked_out_count = 0
+        with transaction.atomic():
+            for record in pending_records:
+                shift = record.shift
+                shift_end_dt = timezone.make_aware(
+                    datetime.combine(shift.date, shift.end_time)
+                )
+                if shift.end_time < shift.start_time:
+                    shift_end_dt += timedelta(days=1)
+
+                max_checkout_dt = shift_end_dt + timedelta(minutes=CHECKOUT_MAX_MINUTES_AFTER_END)
+                if now > max_checkout_dt:
+                    start_dt = record.effective_checkin_at or record.checkin_at
+                    worked_minutes = max(0, int((shift_end_dt - start_dt).total_seconds() // 60))
+                    
+                    record.checkout_at = shift_end_dt
+                    record.worked_minutes = worked_minutes
+                    record.auto_checkout = True
+                    record.save(update_fields=["checkout_at", "worked_minutes", "auto_checkout"])
+                    checked_out_count += 1
+        return checked_out_count
+
+    @staticmethod
     def get_records_for_user(user, shift_date_from=None, shift_date_to=None):
-        """Lấy lịch sử check-in của một nhân viên (có thể lọc theo khoảng ngày)."""
-        qs = CheckInRecord.objects.filter(user=user).select_related("shift__store")
+        """Lấy lịch sử check-in và các ca được phân công của một nhân viên (có thể lọc theo khoảng ngày)."""
+        # Tự động chốt các ca cũ của nhân viên này trước khi truy vấn lịch sử
+        try:
+            AttendanceService.auto_checkout(user)
+        except Exception:
+            pass
+
+        # 1. Lấy tất cả phân công ca làm việc đã xác nhận trong khoảng thời gian
+        assignments_qs = ShiftAssignment.objects.filter(
+            user=user,
+            status=ShiftAssignment.Status.CONFIRMED
+        ).select_related("shift", "shift__store")
+
         if shift_date_from:
-            qs = qs.filter(shift__date__gte=shift_date_from)
+            assignments_qs = assignments_qs.filter(shift__date__gte=shift_date_from)
         if shift_date_to:
-            qs = qs.filter(shift__date__lte=shift_date_to)
-        return qs.order_by("-shift__date", "-checkin_at")
+            assignments_qs = assignments_qs.filter(shift__date__lte=shift_date_to)
+
+        assignments = list(assignments_qs)
+
+        # 2. Lấy tất cả CheckInRecord thực tế trong khoảng thời gian
+        records_qs = CheckInRecord.objects.filter(user=user).select_related(
+            "shift__store", "overridden_by"
+        )
+        if shift_date_from:
+            records_qs = records_qs.filter(shift__date__gte=shift_date_from)
+        if shift_date_to:
+            records_qs = records_qs.filter(shift__date__lte=shift_date_to)
+
+        records = list(records_qs)
+        record_map = {r.shift_id: r for r in records}
+
+        merged_records = []
+        seen_shift_ids = set()
+
+        for a in assignments:
+            shift = a.shift
+            seen_shift_ids.add(shift.id)
+            if shift.id in record_map:
+                merged_records.append(record_map[shift.id])
+            else:
+                dummy_record = CheckInRecord(
+                    id=None, shift=shift, user=user,
+                    checkin_at=None, checkout_at=None, worked_minutes=None,
+                    late_minutes=0, early_minutes=0,
+                    is_manual_override=False,
+                )
+                merged_records.append(dummy_record)
+
+        for r in records:
+            if r.shift_id not in seen_shift_ids:
+                merged_records.append(r)
+
+        merged_records.sort(
+            key=lambda r: (r.shift.date, r.shift.start_time),
+            reverse=True
+        )
+
+        return merged_records
+
 
     @staticmethod
     def force_checkout_all(admin_user):
@@ -287,7 +383,8 @@ class AttendanceService:
                     shift_end_dt += timedelta(days=1)
 
                 if now > shift_end_dt:
-                    worked_minutes = max(0, int((shift_end_dt - record.checkin_at).total_seconds() // 60))
+                    start_dt = record.effective_checkin_at or record.checkin_at
+                    worked_minutes = max(0, int((shift_end_dt - start_dt).total_seconds() // 60))
                     
                     record.checkout_at = shift_end_dt
                     record.worked_minutes = worked_minutes
@@ -510,3 +607,99 @@ class AttendanceService:
             "employee_stats": sorted_employees
         }
 
+    @staticmethod
+    def _parse_datetime(dt_str, tz):
+        """Parse chuỗi datetime thành đối tượng aware datetime. Trả (datetime, None) hoặc (None, error_msg)."""
+        if not dt_str:
+            return None, None
+        try:
+            dt = datetime.fromisoformat(dt_str)
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                try:
+                    dt = datetime.strptime(dt_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return None, f"Định dạng thời gian không hợp lệ: {dt_str}"
+        return (dt if timezone.is_aware(dt) else timezone.make_aware(dt, timezone=tz)), None
+
+    @staticmethod
+    def override_shift_attendance(admin_user, shift_id, user_id, checkin_at_str, checkout_at_str, reason):
+        """
+        Cho phép Admin/Manager chỉnh sửa hoặc tạo mới thông tin chấm công dựa trên shift_id và user_id.
+        Tự động tạo CheckInRecord nếu nhân viên chưa check-in/vắng mặt.
+        """
+        if not reason or not reason.strip():
+            return None, "Lý do chỉnh sửa là bắt buộc."
+        if not checkin_at_str:
+            return None, "Thời gian check-in là bắt buộc."
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        _VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+        checkin_dt, err = AttendanceService._parse_datetime(checkin_at_str, _VN_TZ)
+        if err:
+            return None, err
+        checkout_dt, err = AttendanceService._parse_datetime(checkout_at_str, _VN_TZ)
+        if err:
+            return None, err
+        if checkout_dt and checkout_dt < checkin_dt:
+            return None, "Thời gian check-out không được trước thời gian check-in."
+
+        try:
+            with transaction.atomic():
+                try:
+                    shift = Shift.objects.get(pk=shift_id)
+                except Shift.DoesNotExist:
+                    return None, "Không tìm thấy ca làm việc."
+
+                try:
+                    user = User.objects.get(pk=user_id)
+                except User.DoesNotExist:
+                    return None, "Không tìm thấy nhân viên."
+                record, _created = CheckInRecord.objects.select_for_update().get_or_create(
+                    shift=shift, user=user
+                )
+
+                return AttendanceService._apply_override(
+                    record, admin_user, checkin_dt, checkout_dt, reason, _VN_TZ
+                )
+        except Exception as e:
+            return None, f"Lỗi hệ thống khi chỉnh sửa chấm công: {str(e)}"
+
+    @staticmethod
+    def _apply_override(record, admin_user, checkin_dt, checkout_dt, reason, tz):
+        """
+        Logic chung cập nhật bản ghi chấm công với dữ liệu override đã validate.
+        """
+        shift = record.shift
+        shift_start_dt = timezone.make_aware(datetime.combine(shift.date, shift.start_time), timezone=tz)
+        shift_end_dt = timezone.make_aware(datetime.combine(shift.date, shift.end_time), timezone=tz)
+        if shift.end_time < shift.start_time:
+            shift_end_dt += timedelta(days=1)
+
+        # Cập nhật thông tin bản ghi
+        record.checkin_at = checkin_dt
+        record.effective_checkin_at = checkin_dt
+        record.checkout_at = checkout_dt
+        record.late_minutes = max(0, int((checkin_dt - shift_start_dt).total_seconds() // 60))
+        record.early_minutes = max(0, int((shift_start_dt - checkin_dt).total_seconds() // 60))
+
+        if checkout_dt:
+            effective_checkout = min(checkout_dt, shift_end_dt)
+            record.worked_minutes = max(0, int((effective_checkout - checkin_dt).total_seconds() // 60))
+        else:
+            record.worked_minutes = None
+
+        record.is_manual_override = True
+        record.overridden_by = admin_user
+        record.override_reason = reason.strip()
+
+        record.save(update_fields=[
+            "checkin_at", "effective_checkin_at", "checkout_at",
+            "late_minutes", "early_minutes", "worked_minutes",
+            "is_manual_override", "overridden_by", "override_reason",
+        ])
+        return record, None

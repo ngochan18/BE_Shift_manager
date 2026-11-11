@@ -22,6 +22,8 @@ class ShiftAssignmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'assigned_by', 'assigned_at']
 
     def get_user_metrics(self, obj):
+        if obj.status != 'pending':
+            return None
         user = obj.user
         if not user:
             return None
