@@ -48,6 +48,7 @@ class CheckInRecordSerializer(serializers.ModelSerializer):
     shift_start = serializers.TimeField(source="shift.start_time", read_only=True)
     shift_end = serializers.TimeField(source="shift.end_time", read_only=True)
     store_name = serializers.CharField(source="shift.store.name", read_only=True)
+    overridden_by_name = serializers.CharField(source="overridden_by.full_name", read_only=True)
 
     is_late = serializers.BooleanField(read_only=True)
 
@@ -74,5 +75,12 @@ class CheckInRecordSerializer(serializers.ModelSerializer):
             "is_late",
             "worked_minutes",
             "note",
+            "auto_checkout",
+            "effective_checkin_at",
+            "is_manual_override",
+            "overridden_by",
+            "overridden_by_name",
+            "override_reason",
         ]
         read_only_fields = fields
+

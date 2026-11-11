@@ -28,10 +28,11 @@ def _tinh_phut_huong_luong(cham_cong) -> int:
         cuoi_ca = make_aware(datetime.combine(ca.date, ca.end_time)) + timedelta(days=1)
 
     do_dai_ca = int((cuoi_ca - dau_ca).total_seconds() // 60)
+    start_dt = cham_cong.effective_checkin_at or cham_cong.checkin_at
 
     # Giờ bắt đầu tính lương: Nếu đến muộn <= 5 phút, vẫn tính từ đầu ca
-    muon_giay = (cham_cong.checkin_at - dau_ca).total_seconds()
-    bat_dau_tinh = dau_ca if muon_giay <= PHUT_CHAM_CHUOC * 60 else cham_cong.checkin_at
+    muon_giay = (start_dt - dau_ca).total_seconds()
+    bat_dau_tinh = dau_ca if muon_giay <= PHUT_CHAM_CHUOC * 60 else start_dt
 
     # Giờ kết thúc tính lương: Nếu về sớm <= 5 phút, vẫn tính đủ đến cuối ca.
     # Không tính lương cho thời gian tự ý nán lại sau khi hết ca (checkout_at > cuoi_ca)

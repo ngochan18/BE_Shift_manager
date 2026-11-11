@@ -212,3 +212,34 @@ class AttendanceRecordViewSet(viewsets.GenericViewSet):
         )
         return Response(stats, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['post'], url_path='override-shift')
+    def override_shift(self, request):
+        """Cho phép Admin/Manager chỉnh sửa hoặc tạo mới thông tin chấm công dựa trên shift_id và user_id"""
+        if not _is_admin_or_manager(request.user):
+            return Response({"detail": "Không có quyền truy cập."}, status=status.HTTP_403_FORBIDDEN)
+
+        shift_id = request.data.get("shift_id")
+        user_id = request.data.get("user_id")
+        checkin_at = request.data.get("checkin_at")
+        checkout_at = request.data.get("checkout_at")
+        reason = request.data.get("reason")
+
+        if not shift_id or not user_id:
+            return Response({"detail": "Thiếu thông tin ca làm việc hoặc nhân viên."}, status=status.HTTP_400_BAD_REQUEST)
+
+        record, error = AttendanceService.override_shift_attendance(
+            admin_user=request.user,
+            shift_id=shift_id,
+            user_id=user_id,
+            checkin_at_str=checkin_at,
+            checkout_at_str=checkout_at,
+            reason=reason
+        )
+
+        if error:
+            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(self.get_serializer(record).data, status=status.HTTP_200_OK)
+
+
+
