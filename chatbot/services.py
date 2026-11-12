@@ -327,8 +327,6 @@ def get_estimated_salary(user, args):
 
     data = tinh_luong_ca_nhan(user, month, year)
 
-    # Nếu tháng hiện tại chưa có dữ liệu và người dùng không chỉ định tháng,
-    # tự động thử tháng trước.
     fallback_note = None
     if data["so_ca"] == 0 and not user_specified:
         prev = date(year, month, 1) - timedelta(days=1)
