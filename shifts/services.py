@@ -255,7 +255,6 @@ class ShiftService:
                 locked_shift.is_open = True
                 locked_shift.save(update_fields=['is_open'])
 
-            # Gửi thông báo sau khi transaction commit
             NotificationService.notify_shift_self_cancelled(user, locked_shift)
 
             return assignment, None

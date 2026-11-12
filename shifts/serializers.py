@@ -46,6 +46,26 @@ class ShiftSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
 
+    def validate(self, attrs):
+        is_emergency = attrs.get('is_emergency', False)
+        if self.instance:
+            is_emergency = attrs.get('is_emergency', self.instance.is_emergency)
+
+        if is_emergency:
+            shift_date = attrs.get('date')
+            if not shift_date and self.instance:
+                shift_date = self.instance.date
+
+            if shift_date:
+                from django.utils import timezone
+                from datetime import timedelta
+                today = timezone.localdate()
+                tomorrow = today + timedelta(days=1)
+                if shift_date < today or shift_date > tomorrow:
+                    raise serializers.ValidationError({
+                        "date": "Ca khẩn cấp chỉ được phép chọn ngày hôm nay hoặc ngày mai."
+                    })
+        return attrs
 
 class ShiftBriefSerializer(serializers.ModelSerializer):
     class Meta:
